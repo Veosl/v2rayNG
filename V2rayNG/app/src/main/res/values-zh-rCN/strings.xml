@@ -347,6 +347,20 @@
     <string name="title_sub_update">更新订阅</string>
     <string name="title_ping_all_server">测试 TCP 延迟（TCPing）</string>
     <string name="title_real_ping_all_server">测试真连接延迟</string>
+    <!-- Service check -->
+    <string name="title_service_check">服务检查</string>
+    <string name="service_check_action_start">开始</string>
+    <string name="service_check_running">正在检查</string>
+    <string name="service_check_progress">%1$d/%2$d</string>
+    <string name="service_check_hint_no_tested_configs">还没有配置的真连接延迟结果，请先运行“%1$s”。</string>
+    <string name="service_check_label_exit_ip">出口 IP</string>
+    <string name="service_check_label_premium">YouTube 高级版</string>
+    <string name="service_check_status_yes">YES</string>
+    <string name="service_check_status_no">NO</string>
+    <string name="service_check_status_ipblock">IPBLOCK</string>
+    <string name="service_check_status_unknown">UNKNOWN</string>
+    <string name="service_check_value_none">-</string>
+    <string name="service_check_error">错误：%1$s</string>
     <string name="title_user_asset_setting">资源文件</string>
     <string name="title_sort_by_test_results">按测试结果排序</string>
     <string name="title_filter_config">过滤配置</string>

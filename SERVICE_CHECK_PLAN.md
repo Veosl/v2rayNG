@@ -36,33 +36,33 @@ Rules that apply to the whole task:
 
 ## Stage 2 — Vertical slice, reachable in the UI
 
-* [ ] 2.1 Add `MainMoreMenuAction.ServiceCheck` and handle it in **every** `when` over
+* [x] 2.1 Add `MainMoreMenuAction.ServiceCheck` and handle it in **every** `when` over
       `MainMoreMenuAction` (`MainScreen.kt`).
-* [ ] 2.2 Add `MainAction.ServiceCheck` and route it to the new activity from
+* [x] 2.2 Add `MainAction.ServiceCheck` and route it to the new activity from
       `MainActivity` (the activity owns the navigation entry).
-* [ ] 2.3 New Compose screen `ServiceCheckActivity` (extends `BaseComponentActivity`,
+* [x] 2.3 New Compose screen `ServiceCheckActivity` (extends `BaseComponentActivity`,
       `AppTopBar`, `exported=false` manifest entry) + `ServiceCheckViewModel`
       (state in a `StateFlow`, work on `Dispatchers.IO`).
-* [ ] 2.4 Build the per-profile runtime config with the same function the real-ping worker
+* [x] 2.4 Build the per-profile runtime config with the same function the real-ping worker
       uses (`CoreConfigManager.getV2rayConfig4Speedtest`) and add **one** SOCKS inbound on
       `127.0.0.1` on a random free port, no auth; the profile's proxy outbound stays the
       first outbound.
-* [ ] 2.5 Start a temporary core (`CoreNativeManager.newCoreController` + `startLoop`,
+* [x] 2.5 Start a temporary core (`CoreNativeManager.newCoreController` + `startLoop`,
       no-op callback), poll the port until it accepts connections (≤ ~3 s), always stop it
       in a `NonCancellable` `finally` block (also on cancel / timeout / error).
-* [ ] 2.6 Fresh `OkHttpClient` per profile with
+* [x] 2.6 Fresh `OkHttpClient` per profile with
       `Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))`, no custom `Dns`,
       call timeout from the check definition, one retry on `IOException`, no manual
       `Accept-Encoding`.
-* [ ] 2.7 Implement checks `exit_ip` and `youtube_premium` only, with the exact URLs,
+* [x] 2.7 Implement checks `exit_ip` and `youtube_premium` only, with the exact URLs,
       headers, cookies and markers from the spec (+ errata).
-* [ ] 2.8 List one row per profile (remark, exit IP, Premium status), a progress counter
+* [x] 2.8 List one row per profile (remark, exit IP, Premium status), a progress counter
       (`12/87`) and a **Cancel** button; keep the screen on while running.
-* [ ] 2.9 Only profiles of the selected subscription group with `testDelayMillis > 0`;
+* [x] 2.9 Only profiles of the selected subscription group with `testDelayMillis > 0`;
       if there are none, tell the user to run “Test all real delay” first.
-* [ ] 2.10 Concurrency from `SettingsManager.getRealPingConcurrency()`, ~300 ms between the
-      checks of one profile.
-* [ ] 2.11 Results are in memory only.
+* [x] 2.10 Concurrency from the constant `SERVICE_CHECK_CONCURRENCY = 3`, ~300 ms between
+      the checks of one profile.
+* [x] 2.11 Results are in memory only.
 
 ## Stage 3 — Everything else
 
@@ -89,17 +89,44 @@ Rules that apply to the whole task:
 
 ## Check catalogue (fixed scope)
 
+Verified against `reference/ipregion.sh` (4108 lines) — the script is the source of truth.
+
 | check id | source | method | URL | notes |
 |---|---|---|---|---|
-| `exit_ip` | task | GET | `https://api.ipify.org` | body is the IP; informational only |
-| `google_country` | spec 2.5 | GET | `https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid` | regex `name="region" value="([^"]*)"` |
-| `youtube_country` | spec 2.1 | GET | `https://www.youtube.com/sw.js_data` | strip `)]}'`, JSON path `[0][2][0][0][1]`, 2 uppercase letters |
-| `youtube_premium` | spec 2.2 | POST | `https://www.youtube.com/youtubei/v1/browse` | 200 + `premiumPurchaseButtonRenderer` → YES |
-| `google_search_captcha` | spec 2.4 | GET | `https://www.google.com/search?q=cats` | 429 or `Location` containing `/sorry/` → IPBLOCK |
+| `exit_ip` | task | GET | `https://api.ipify.org` | body is the IP; informational only. Script: `IPV4_IDENTITY_URLS` line 230, fetched at line 1973 without extra headers; the answer is validated against `IPV4_PATTERN` (line 248) / `IPV6_PATTERN` (line 249) |
+| `google_country` | spec 2.5 | GET | `https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid` | regex `name="region" value="([^"]*)"`; script sends the Firefox UA (line 2644) |
+| `youtube_country` | spec 2.1 | GET | `https://www.youtube.com/sw.js_data` | strip `)]}'`, JSON path `[0][2][0][0][1]`, 2 uppercase letters; **no explicit UA** (script line 2651) |
+| `youtube_premium` | spec 2.2 | POST | `https://www.youtube.com/youtubei/v1/browse` | 200 + `premiumPurchaseButtonRenderer` → YES; `Content-Type`/`Accept: application/json` from curl's `--json`; **no explicit UA** (script line 2833) |
+| `google_search_captcha` | spec 2.4 | GET | `https://www.google.com/search?q=cats` | 429 or `Location` containing `/sorry/` → IPBLOCK; script sends UA + `SOCS=CAI` + `Accept-Language` (line 2944) |
 | `youtube_music_experimental` | task | GET | `https://music.youtube.com/` | marker lists `blockedMarkers` / `availableMarkers`, empty by default |
 
 **Not ported:** “YouTube No Ads” (it is not a YouTube Music check), every other ipregion
 service, and the Gemini checks (explicitly deferred).
+
+## Decision: the runner runs in the UI process
+
+The task asked to investigate where the core environment is initialized and in which
+process each piece runs, and to decide where the runner lives. Evidence:
+
+| Fact | Evidence |
+|---|---|
+| `CoreNativeManager.initCoreEnv` is called only in the daemon and in `:tasks` | `CoreServiceManager.kt:67`, `CoreTestService.kt:56`, `SubscriptionUpdateService.kt:48` — **not** in the UI process |
+| The UI process already loads `libv2ray.so` | `AboutActivity.kt:66` and `CheckUpdateActivity.kt:65` call `getLibVersion()` |
+| MMKV works in every process | `AngApplication.onCreate` → `MmkvManager.initialize` with `MULTI_PROCESS_MODE` |
+| The native API is public and process-local | `CoreNativeManager.initCoreEnv` (line 28) and `newCoreController` (line 92) are public |
+| The real-ping worker runs in `:tasks` | `MainViewModel.testAllRealPing` → `TestServiceMessage` → `CoreTestService` → `RealPingWorkerService` |
+
+**Decision: the temporary cores run in the UI process.** `ServiceCheckRunner` calls
+`CoreNativeManager.initCoreEnv(context.applicationContext)` itself; the app's own core
+keeps running in the daemon process and is not touched.
+
+**No new Service component is needed**, so the “stop and ask” rule did not trigger:
+`CoreTestService` would require a foreground service (forbidden by the task) plus new
+IPC, while the runner needs neither.
+
+**Known deviation:** `LauncherManager.kt:73-74` deliberately avoids loading the native
+libraries in the UI process, so this feature loads `libv2ray.so` there. That is a
+deliberate, disclosed difference.
 
 ## Open items / decisions
 
@@ -107,5 +134,12 @@ service, and the Gemini checks (explicitly deferred).
   client is built locally with the same OkHttp builder pattern and a SOCKS `Proxy`.
 * `Proxy.Type.SOCKS` has no other usage in this repository; the SOCKS setup follows the
   task instructions verbatim.
+* Concurrency is the constant `SERVICE_CHECK_CONCURRENCY = 3`, **not**
+  `SettingsManager.getRealPingConcurrency()`: every config starts its own native core,
+  so the number of parallel cores is kept low and constant.
+* The two ported checks send **no explicit `User-Agent`** (erratum 5 of
+  `IPREGION_PORT_SPEC.md`); OkHttp sends its own default. The script sends curl's default.
+* OkHttp adds `Accept-Encoding: gzip` itself and decodes the answer transparently; the
+  task forbids setting that header manually, which is respected.
 * The root `AGENTS.md` asks for JVM tests for new ViewModel logic; the task instruction
   “no unit tests” overrides it for this task.

@@ -179,6 +179,7 @@ fun MainScreen(
                             MainMoreMenuAction.SortByTestResults -> onAction(MainAction.SortByTestResults)
                             MainMoreMenuAction.TestAll -> onAction(MainAction.TestAllServers)
                             MainMoreMenuAction.TestAllRealPing -> onAction(MainAction.TestRealAllServers)
+                            MainMoreMenuAction.ServiceCheck -> onAction(MainAction.ServiceCheck)
                             MainMoreMenuAction.UpdateSubscriptions -> onAction(MainAction.UpdateSubscriptions)
                         }
                     }

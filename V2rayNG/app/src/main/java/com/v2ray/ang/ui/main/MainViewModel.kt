@@ -310,6 +310,7 @@ class MainViewModel(
             is MainAction.ImportManually,
             MainAction.RestartService,
             MainAction.LocateSelectedServer,
+            MainAction.ServiceCheck,
             is MainAction.EditServer,
             is MainAction.ShareClipboard,
             is MainAction.ShareFullContent,

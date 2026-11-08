@@ -347,6 +347,20 @@
     <string name="title_sub_update">Обновить подписку</string>
     <string name="title_ping_all_server">Проверить TCP-задержку</string>
     <string name="title_real_ping_all_server">Проверить реальную задержку</string>
+    <!-- Service check -->
+    <string name="title_service_check">Проверка сервисов</string>
+    <string name="service_check_action_start">Запустить</string>
+    <string name="service_check_running">Проверка</string>
+    <string name="service_check_progress">%1$d/%2$d</string>
+    <string name="service_check_hint_no_tested_configs">Нет результатов реальной задержки. Сначала выполните «%1$s».</string>
+    <string name="service_check_label_exit_ip">Выходной IP</string>
+    <string name="service_check_label_premium">YouTube Premium</string>
+    <string name="service_check_status_yes">YES</string>
+    <string name="service_check_status_no">NO</string>
+    <string name="service_check_status_ipblock">IPBLOCK</string>
+    <string name="service_check_status_unknown">UNKNOWN</string>
+    <string name="service_check_value_none">-</string>
+    <string name="service_check_error">Ошибка: %1$s</string>
     <string name="title_user_asset_setting">Файлы ресурсов</string>
     <string name="title_sort_by_test_results">Сортировать по результатам теста</string>
     <string name="title_filter_config">Фильтр профилей</string>

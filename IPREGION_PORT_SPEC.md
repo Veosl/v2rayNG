@@ -2,7 +2,7 @@
 
 ## ERRATA (applies to every section below)
 
-These four corrections override the rest of this document wherever they disagree.
+These five corrections override the rest of this document wherever they disagree.
 
 1. **“YouTube No Ads” is not a YouTube Music check.** `ipregion.sh` has no YouTube Music
    check at all. Section 2.3 (`check_availability_youtube_no_ads`) is the “No Ads” check
@@ -28,9 +28,24 @@ These four corrections override the rest of this document wherever they disagree
    Section 5.2 item 3 spells it `)]}'\n`; the escaped `\n` is not part of the prefix.
    Strip exactly the 4 characters `)]}'` and parse the remainder as JSON.
 
-*Verification note:* `reference/ipregion.sh` is **not present** in this checkout, so the
-`-L` usage could not be confirmed from the script itself; the conclusion above is derived
-from the curl argument construction documented in sections 1.1 and 1.2 of this file.
+5. **The YouTube country and YouTube Premium checks send no `User-Agent`.**
+   Sections 2.1 and 2.2 claim the Firefox `USER_AGENT` for both checks. The script does
+   **not** send it: `check_platforms_youtube` calls
+   `http_request "$ip_version" "$YOUTUBE_URL"` (line 2651) and
+   `check_availability_youtube_premium` calls
+   `http_request "$ip_version" "$YOUTUBE_INNERTUBE_BROWSE_URL" --json "$YOUTUBE_PREMIUM_QUERY"`
+   (line 2833) — neither passes `--user-agent`. `--user-agent "$USER_AGENT"` appears only
+   at lines 2644, 2692, 2698, 2859, 2861, 2926, 2944 and 2976 (Google country, Reddit,
+   YouTube No Ads, Reddit guest, Google Search captcha, Gemini). Both YouTube checks
+   therefore run with **curl's own default UA**, i.e. the port must not set an explicit
+   `User-Agent` header for them and lets the HTTP client use its own default.
+
+*Verification note:* `reference/ipregion.sh` **is present** in this checkout (4108 lines)
+and is the source of truth. The conclusions above were read from it:
+`CURL_BASE_ARGS` (line 122), `build_curl_args()` (lines 1822-1836), the three curl
+invocations (lines 1725, 1847, 1973), the only `--location` occurrence (line 2497, the
+RIPE geoip lookup, which is not part of this port), and the `--user-agent` occurrences
+listed in erratum 5.
 
 ---
 
@@ -131,7 +146,8 @@ SERVICE_GROUPS=(platforms cdn availability ai geoip)
 #### Request
 - **URL:** `https://www.youtube.com/sw.js_data`
 - **Method:** GET
-- **Headers:** Only default UA (`USER_AGENT`)
+- **Headers:** None — no `--user-agent` is passed (see erratum 5), so curl's default UA
+  is sent
 - **Cookies:** None
 - **curl flags:** From `build_curl_args(ip_version)` + base args
 - **IP version:** Per IP version (4 or 6), or proxy
@@ -167,8 +183,10 @@ country=$(jq -r '.[0][2][0][0][1] // empty' <<<"${HTTP_BODY#"$YOUTUBE_JSON_PREFI
 - **URL:** `https://www.youtube.com/youtubei/v1/browse`
 - **Method:** POST
 - **Headers:**
-  - `Content-Type: application/json` (implied by `--json`)
-  - `User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0`
+  - `Content-Type: application/json` (added by curl's `--json`)
+  - `Accept: application/json` (added by curl's `--json`)
+  - No `User-Agent` — the script passes no `--user-agent` here (see erratum 5), so curl's
+    default UA is sent
 - **Body (JSON):**
   ```json
   {"context":{"client":{"clientName":"MWEB","clientVersion":"2.20261020.00.00","hl":"en","gl":"US"}},"browseId":"SPunlimited"}
@@ -271,7 +289,7 @@ youtube_no_ads_status() {
   - `Cookie: SOCS=CAI` (constant `GOOGLE_SOCS_COOKIE`, line 330)
   - `Accept-Language: en-US,en;q=0.9` (constant `ACCEPT_LANGUAGE_ENGLISH`, line 331)
 - **Cookies:** `SOCS=CAI`
-- **curl flags:** Follow redirects (default), base args
+- **curl flags:** Do not follow redirects (no `-L`, see erratum 2), base args
 
 #### Response Parsing
 ```bash

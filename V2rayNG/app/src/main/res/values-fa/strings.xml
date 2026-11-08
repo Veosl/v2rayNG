@@ -347,6 +347,20 @@
     <string name="title_sub_update">به‌روزرسانی گروه فعلی اشتراک</string>
     <string name="title_ping_all_server">آزمایش تأخیر TCP (TCPing)</string>
     <string name="title_real_ping_all_server">آزمایش تأخیر واقعی</string>
+    <!-- Service check -->
+    <string name="title_service_check">بررسی سرویس‌ها</string>
+    <string name="service_check_action_start">شروع</string>
+    <string name="service_check_running">در حال بررسی</string>
+    <string name="service_check_progress">%1$d/%2$d</string>
+    <string name="service_check_hint_no_tested_configs">هنوز نتیجه‌ای برای تأخیر واقعی وجود ندارد. ابتدا «%1$s» را اجرا کنید.</string>
+    <string name="service_check_label_exit_ip">IP خروجی</string>
+    <string name="service_check_label_premium">YouTube Premium</string>
+    <string name="service_check_status_yes">YES</string>
+    <string name="service_check_status_no">NO</string>
+    <string name="service_check_status_ipblock">IPBLOCK</string>
+    <string name="service_check_status_unknown">UNKNOWN</string>
+    <string name="service_check_value_none">-</string>
+    <string name="service_check_error">خطا: %1$s</string>
     <string name="title_user_asset_setting">فایل های منبع جغرافیایی</string>
     <string name="title_sort_by_test_results">مرتب‌سازی بر اساس نتایج آزمایش</string>
     <string name="title_filter_config">فیلتر کردن کانفیگ‌ها</string>
