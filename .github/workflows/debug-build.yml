@@ -1,0 +1,166 @@
+name: Build debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+    paths-ignore:
+      - '**.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debug-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+      with:
+        submodules: 'recursive'
+
+    - name: Show submodule state
+      run: |
+        echo "--- .gitmodules ---"
+        cat .gitmodules 2>/dev/null || echo "no .gitmodules"
+        echo "--- hev-socks5-tunnel ---"
+        ls -A hev-socks5-tunnel 2>/dev/null | head -5 || true
+        echo "--- AndroidLibXrayLite ---"
+        ls -A AndroidLibXrayLite 2>/dev/null | head -5 || true
+
+    # If the project was uploaded from a zip, submodule folders are empty.
+    # hev-socks5-tunnel is needed to build the native tunnel library.
+    - name: Ensure hev-socks5-tunnel source is present
+      run: |
+        if [ -z "$(ls -A hev-socks5-tunnel 2>/dev/null)" ]; then
+          echo "hev-socks5-tunnel is empty or missing, cloning it"
+          rm -rf hev-socks5-tunnel
+          git clone --recursive --depth 1 https://github.com/heiher/hev-socks5-tunnel hev-socks5-tunnel
+        else
+          echo "hev-socks5-tunnel is present"
+        fi
+
+    - name: Setup Java
+      uses: actions/setup-java@v6.1.0
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+        cache: 'gradle'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v4
+      with:
+        log-accepted-android-sdk-licenses: false
+        cmdline-tools-version: '14742923'
+        packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+
+    - name: Install NDK
+      run: |
+        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+          --channel=0 \
+          --install "ndk;30.0.16248370"
+        echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
+        GRADLE_FILE="${{ github.workspace }}/V2rayNG/app/build.gradle.kts"
+        if ! grep -q 'ndkVersion' "$GRADLE_FILE"; then
+          sed -i '/^android {/a\    ndkVersion = "30.0.16248370"' "$GRADLE_FILE"
+        fi
+        grep -n 'ndkVersion' "$GRADLE_FILE" || { echo "ERROR: ndkVersion was not set in build.gradle.kts"; exit 1; }
+
+    - name: Restore cached libhevtun
+      id: cache-libhevtun-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ github.workspace }}/libs
+        key: libhevtun-${{ runner.os }}-${{ env.NDK_HOME }}-${{ hashFiles('.git/modules/hev-socks5-tunnel/HEAD') }}-${{ hashFiles('compile-hevtun.sh') }}
+
+    - name: Build libhevtun
+      if: steps.cache-libhevtun-restore.outputs.cache-hit != 'true'
+      run: |
+        bash compile-hevtun.sh
+
+    - name: Save libhevtun
+      if: steps.cache-libhevtun-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ github.workspace }}/libs
+        key: libhevtun-${{ runner.os }}-${{ env.NDK_HOME }}-${{ hashFiles('.git/modules/hev-socks5-tunnel/HEAD') }}-${{ hashFiles('compile-hevtun.sh') }}
+
+    - name: Copy libhevtun
+      run: |
+        cp -r ${{ github.workspace }}/libs ${{ github.workspace }}/V2rayNG/app
+
+    # The libv2ray.aar must match the AndroidLibXrayLite version this source expects.
+    # With a real git checkout the submodule tag is used. With a zip upload there is
+    # no tag, so the latest release is used as a fallback (it may not match exactly).
+    - name: Detect AndroidLibXrayLite tag
+      run: |
+        TAG=""
+        if [ -e AndroidLibXrayLite/.git ]; then
+          TAG=$(git -C AndroidLibXrayLite describe --tags --abbrev=0 2>/dev/null || true)
+        fi
+        echo "Detected AndroidLibXrayLite tag: '${TAG}'"
+        echo "LIB_TAG=${TAG}" >> $GITHUB_ENV
+
+    - name: Download libv2ray (matching tag)
+      if: env.LIB_TAG != ''
+      uses: robinraju/release-downloader@v1.13
+      with:
+        repository: '2dust/AndroidLibXrayLite'
+        tag: ${{ env.LIB_TAG }}
+        fileName: 'libv2ray.aar'
+        out-file-path: V2rayNG/app/libs/
+
+    - name: Download libv2ray (latest release fallback)
+      if: env.LIB_TAG == ''
+      uses: robinraju/release-downloader@v1.13
+      with:
+        repository: '2dust/AndroidLibXrayLite'
+        latest: true
+        fileName: 'libv2ray.aar'
+        out-file-path: V2rayNG/app/libs/
+
+    - name: Build debug APK
+      shell: bash
+      working-directory: V2rayNG
+      run: |
+        set -o pipefail
+        echo "sdk.dir=${ANDROID_HOME}" > local.properties
+        chmod 755 gradlew
+        ./gradlew assembleFdroidDebug --console=plain 2>&1 | tee ../build.log
+
+    - name: List built APKs
+      if: always()
+      run: |
+        find V2rayNG/app/build/outputs/apk -name '*.apk' -exec ls -lh {} \; 2>/dev/null || echo "no APKs found"
+
+    - name: Upload arm64-v8a debug APK
+      if: success()
+      uses: actions/upload-artifact@v7
+      with:
+        name: debug-arm64-v8a
+        path: V2rayNG/app/build/outputs/apk/*/debug/*arm64-v8a*.apk
+        if-no-files-found: warn
+
+    - name: Upload universal debug APK
+      if: success()
+      uses: actions/upload-artifact@v7
+      with:
+        name: debug-universal
+        path: V2rayNG/app/build/outputs/apk/*/debug/*universal*.apk
+        if-no-files-found: warn
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: build-log
+        path: build.log
+        if-no-files-found: ignore

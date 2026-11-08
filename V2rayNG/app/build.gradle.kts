@@ -39,6 +39,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Debug builds are installed side by side with the release app.
+            applicationIdSuffix = ".dev"
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

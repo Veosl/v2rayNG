@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Debug builds are installed side by side with the release app (applicationIdSuffix ".dev"),
+         so the launcher label has to tell them apart. -->
+    <string name="app_name" translatable="false">v2rayNG DEV</string>
+</resources>
