@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
+import com.v2ray.ang.core.ServiceCheckManager
 import com.v2ray.ang.dto.ConnectionTestResult
 import com.v2ray.ang.dto.GroupMapItem
 import com.v2ray.ang.dto.LocateTarget
@@ -311,6 +312,7 @@ class MainViewModel(
             MainAction.RemoveDuplicateServers -> removeDuplicateServerAsync()
             MainAction.RemoveInvalidServers -> removeInvalidServerAsync()
             MainAction.SortByTestResults -> sortByTestResultsAsync()
+            MainAction.ClearServiceCheckResults -> clearServiceCheckResults()
             MainAction.UpdateSubscriptions -> importConfigViaSub(uiState.value.selectedGroupId)
             is MainAction.UpdateGroupSubscription -> importConfigViaSub(action.groupId)
             MainAction.ExportAll -> exportAllAsync()
@@ -338,7 +340,6 @@ class MainViewModel(
             is MainAction.ImportManually,
             MainAction.RestartService,
             MainAction.LocateSelectedServer,
-            MainAction.ServiceCheck,
             is MainAction.EditServer,
             is MainAction.ShareClipboard,
             is MainAction.ShareFullContent,
@@ -745,6 +746,32 @@ class MainViewModel(
             listOf(groupId)
         }
         subs.forEach { dataSource.sortByTestResultsForSub(it) }
+    }
+
+    /**
+     * Removes every service check report.
+     *
+     * A running service check is stopped first, so it cannot write a report after the
+     * store was cleared. The real delay results are not touched, they belong to the
+     * real delay test.
+     */
+    private fun clearServiceCheckResults() {
+        launchLoading {
+            try {
+                // The workers are stopped and awaited first, so no report can be
+                // written after the store was emptied.
+                ServiceCheckManager.cancelAndJoin()
+                withContext(ioDispatcher) {
+                    dataSource.clearServiceCheckResults()
+                }
+                toastSuccess(R.string.toast_service_check_results_cleared)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                LogUtil.e(AppConfig.TAG, "Clear service check results failed", e)
+                toastError(R.string.toast_failure)
+            }
+        }
     }
 
     fun subscriptionIdChanged(id: String) {

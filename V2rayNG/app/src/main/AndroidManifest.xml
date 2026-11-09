@@ -139,9 +139,6 @@
             android:name=".ui.logcat.LogcatActivity"
             android:exported="false" />
         <activity
-            android:name=".ui.servicecheck.ServiceCheckActivity"
-            android:exported="false" />
-        <activity
             android:name=".ui.routing.RoutingSettingActivity"
             android:exported="false" />
         <activity

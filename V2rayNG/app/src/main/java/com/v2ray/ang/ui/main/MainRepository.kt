@@ -187,6 +187,10 @@ class MainRepository(
         AngConfigManager.sortByTestResultsForSub(subId)
     }
 
+    override fun clearServiceCheckResults() {
+        MmkvManager.clearServiceCheckReports()
+    }
+
     override fun getSubsList(): List<String> = MmkvManager.decodeSubsList()
 
     override suspend fun importBatchConfig(

@@ -1,0 +1,62 @@
+{
+  "timeoutSeconds": 5,
+  "portTimeoutMs": 3000,
+  "checkIntervalMs": 300,
+  "bodyPreviewLimitBytes": 4096,
+  "musicBodyLimitBytes": 65536,
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+  "checks": {
+    "exit_ip": {
+      "url": "https://api.ipify.org",
+      "method": "GET",
+      "useUserAgent": false,
+      "headers": {}
+    },
+    "youtube_premium": {
+      "url": "https://www.youtube.com/youtubei/v1/browse",
+      "method": "POST",
+      "useUserAgent": false,
+      "headers": {
+        "Accept": "application/json"
+      },
+      "body": "{\"context\":{\"client\":{\"clientName\":\"MWEB\",\"clientVersion\":\"2.20261020.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"browseId\":\"SPunlimited\"}",
+      "marker": "premiumPurchaseButtonRenderer"
+    },
+    "youtube_country": {
+      "url": "https://www.youtube.com/sw.js_data",
+      "method": "GET",
+      "useUserAgent": false,
+      "headers": {},
+      "jsonPrefix": ")]}'"
+    },
+    "google_country": {
+      "url": "https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid",
+      "method": "GET",
+      "useUserAgent": true,
+      "headers": {},
+      "countryPattern": "name=\"region\" value=\"([^\"]*)\""
+    },
+    "google_search_captcha": {
+      "url": "https://www.google.com/search?q=cats",
+      "method": "GET",
+      "useUserAgent": true,
+      "headers": {
+        "Cookie": "SOCS=CAI",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      "captchaPath": "/sorry/",
+      "noJsMarker": "enablejs"
+    },
+    "youtube_music_experimental": {
+      "url": "https://music.youtube.com/",
+      "method": "GET",
+      "useUserAgent": true,
+      "headers": {
+        "Cookie": "SOCS=CAI; PREF=hl=ru",
+        "Accept-Language": "ru"
+      },
+      "blockedMarkers": [],
+      "availableMarkers": []
+    }
+  }
+}

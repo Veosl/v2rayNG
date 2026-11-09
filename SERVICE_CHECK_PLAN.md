@@ -140,18 +140,20 @@ Rules that apply to the whole task:
 
 ## Stage B — service check results on the main page; remove the Service check page
 
-* [ ] B1. Remove the Service check page completely: `ServiceCheckActivity` /
+* [x] B1. Remove the Service check page completely: `ServiceCheckActivity` /
       `ServiceCheckViewModel` / `ServiceCheckContract`, its manifest entry, the
       “Service check” menu entry and everything that exists only for it
       (`MainMoreMenuAction.ServiceCheck`, `MainAction.ServiceCheck`, handlers, unused
       strings). Prove with grep that nothing references them any more. **Keep
       `ServiceCheckRunner`.**
-* [ ] B2. Application-scoped manager. `object ServiceCheckManager` with its own
+* [x] B2. Application-scoped manager. `object ServiceCheckManager` with its own
       `CoroutineScope(SupervisorJob + Dispatchers.Default)` and a `StateFlow` of run state
       (running, done, total, goodCount). It queues configs and runs `ServiceCheckRunner`
       on them with `SERVICE_CHECK_CONCURRENCY = 3`. A run survives the main activity being
-      recreated. Expose `start(guids)`, `enqueue(guid)`, `cancel()`.
-* [ ] B3. Checks. Keep `exit_ip` and `youtube_premium`. Add `google_country`,
+      recreated. Expose `start(guids)`, `enqueue(guid)`, `cancel()`, and
+      `cancelAndJoin()` (waits until every worker is gone, used before the store is
+      emptied).
+* [x] B3. Checks. Keep `exit_ip` and `youtube_premium`. Add `google_country`,
       `youtube_country`, `google_search_captcha`, `youtube_music_experimental`. Source of
       truth: `reference/ipregion.sh`, then the spec and its errata. Where the script sends
       no `User-Agent`, send none. All checks use `followRedirects(false)`.
@@ -168,13 +170,18 @@ Rules that apply to the whole task:
       * `ipregion_checks.json` holds only tunables (URLs, headers, UA, regexes, marker
         lists, timeouts). The logic stays in Kotlin. Use the JSON library already in the
         project.
-* [ ] B4. Persistence. A new MMKV store following the `MmkvManager` pattern, key = guid,
+* [x] B4. Persistence. A new MMKV store following the `MmkvManager` pattern, key = guid,
       value = JSON of a report (timestamp + per-check results: status
       YES/NO/IPBLOCK/UNKNOWN, value, reason, httpCode, locationHeader, bodyPreview up to
       4 KB, plus the full captured music body in a separate field). Delete a profile's
       report wherever its `ServerAffiliationInfo` is removed (delete one, delete
       duplicates, delete invalid, delete all). Add **“Clear service check results”** to the
       more-menu.
+      * **Real-delay results must never be deleted or overwritten by service check
+        data.** `ServerAffiliationInfo.testDelayMillis` belongs to the real-delay test
+        only; the service check writes to its **own** MMKV store (its own key namespace
+        and its own JSON payload) and never reads, writes or clears the delay field.
+        “Clear service check results” clears the service-check store only.
 * [ ] B5. Main list row. Append to the existing delay display, without changing the row
       height or removing anything:
       * the 2-letter exit country (YouTube country, else Google country), small text;
@@ -190,6 +197,30 @@ Rules that apply to the whole task:
       that copies the **full** captured body.
 * [ ] B7. Add ipregion's MIT license text (spec section 6) and the credit to
       `assets/open_source_licenses.html`, following its structure.
+
+### Status of the first B part (B1–B4, “B-core”)
+
+Done and committed:
+
+* B1 — the Service check page and everything that only existed for it are gone
+  (activity, view model, contract, manifest entry, menu entry, action, strings).
+* B2 — `core/ServiceCheckManager.kt`, an application-scoped manager with its own scope
+  and a `StateFlow` of the run state. Three workers, an unlimited queue, lazy worker
+  start, `pending` bookkeeping, `cancelAndJoin()`.
+* B3 — `core/ServiceCheckRunner.kt` (rewritten) and `core/ServiceCheckConfig.kt` with
+  the tunable asset `assets/ipregion_checks.json`.
+* B4 — the `SERVICE_CHECK` MMKV store in `handler/MmkvManager.kt`, the cleanup hooks and
+  the “Clear service check results” entry of the more-menu.
+
+Still open in this stage:
+
+* B5, B6, B7 are not started.
+* Nothing can start a service check run from the UI yet: `ServiceCheckManager.start()`
+  has no caller. The “YT” button of Stage C1 (or the B5/B6 work) will add one.
+* The marker lists of `youtube_music_experimental` are empty, so that check always
+  answers `UNKNOWN` until the user fills them in.
+* Nothing was compiled or run on a device yet: this checkout has no JDK, no Android
+  SDK and no Gradle cache.
 
 ## Stage C — “YT” button and long-press auto-connect
 

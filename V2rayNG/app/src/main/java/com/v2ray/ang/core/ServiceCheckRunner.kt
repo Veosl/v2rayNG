@@ -2,8 +2,14 @@ package com.v2ray.ang.core
 
 import android.content.Context
 import android.os.SystemClock
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
+import com.google.gson.JsonParser
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.dto.V2rayConfig
+import com.v2ray.ang.dto.entities.ServiceCheckReport
+import com.v2ray.ang.dto.entities.ServiceCheckResult
+import com.v2ray.ang.dto.entities.ServiceCheckStatus
 import com.v2ray.ang.util.JsonUtil
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
@@ -18,28 +24,13 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okio.Buffer
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
 import java.util.concurrent.TimeUnit
-
-/**
- * Number of configs that are checked at the same time.
- *
- * The real-ping worker uses the user setting for this, but a service check starts one
- * native core per config, so the amount of parallel cores is kept low and constant.
- */
-const val SERVICE_CHECK_CONCURRENCY = 3
-
-/** Pause between two checks of the same config. */
-const val SERVICE_CHECK_INTERVAL_MS = 300L
-
-/** Timeout of one HTTP check, same value as ipregion.sh DEFAULT_TIMEOUT. */
-private const val SERVICE_CHECK_TIMEOUT_SECONDS = 5L
-
-/** How long the temporary core may take to open its SOCKS inbound. */
-private const val SERVICE_CHECK_PORT_TIMEOUT_MS = 3_000L
 
 /** Protocols that never carry the traffic of a profile. */
 private val SERVICE_CHECK_NON_PROXY_PROTOCOLS = setOf("freedom", "blackhole", "dns")
@@ -50,31 +41,8 @@ private val SERVICE_CHECK_IPV4_PATTERN = Regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$")
 /** ipregion.sh constant IPV6_PATTERN. */
 private val SERVICE_CHECK_IPV6_PATTERN = Regex("^[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}$")
 
-/** Result of one check. */
-enum class ServiceCheckStatus {
-    YES,
-    NO,
-    IPBLOCK,
-    UNKNOWN
-}
-
-/** Result of one check. */
-data class ServiceCheckResult(
-    val checkId: String,
-    val status: ServiceCheckStatus,
-    val value: String? = null,
-    val reason: String? = null,
-    val httpCode: Int? = null,
-)
-
-/** Results of every check of one config. */
-data class ServiceCheckReport(
-    val guid: String,
-    val results: List<ServiceCheckResult>,
-    val error: String? = null,
-) {
-    fun result(checkId: String): ServiceCheckResult? = results.firstOrNull { it.checkId == checkId }
-}
+/** ipregion.sh constant COUNTRY_CODE_PATTERN. */
+private val SERVICE_CHECK_COUNTRY_PATTERN = Regex("^[A-Z]{2}$")
 
 /**
  * Runs the service checks of one config through a throwaway native core.
@@ -87,39 +55,44 @@ object ServiceCheckRunner {
 
     const val CHECK_EXIT_IP = "exit_ip"
     const val CHECK_YOUTUBE_PREMIUM = "youtube_premium"
+    const val CHECK_YOUTUBE_COUNTRY = "youtube_country"
+    const val CHECK_GOOGLE_COUNTRY = "google_country"
+    const val CHECK_GOOGLE_SEARCH_CAPTCHA = "google_search_captcha"
+    const val CHECK_YOUTUBE_MUSIC = "youtube_music_experimental"
 
-    /** ipregion.sh fetches the external IP from this list without any extra header. */
-    private const val EXIT_IP_URL = "https://api.ipify.org"
-
-    /** ipregion.sh constant YOUTUBE_INNERTUBE_BROWSE_URL. */
-    private const val YOUTUBE_PREMIUM_URL = "https://www.youtube.com/youtubei/v1/browse"
-
-    /** ipregion.sh constant YOUTUBE_PREMIUM_QUERY. */
-    private const val YOUTUBE_PREMIUM_BODY =
-        "{\"context\":{\"client\":{\"clientName\":\"MWEB\",\"clientVersion\":\"2.20261020.00.00\"," +
-            "\"hl\":\"en\",\"gl\":\"US\"}},\"browseId\":\"SPunlimited\"}"
-
-    /** ipregion.sh constant YOUTUBE_PREMIUM_PURCHASE_MARKER. */
-    private const val YOUTUBE_PREMIUM_MARKER = "premiumPurchaseButtonRenderer"
+    /** The JSON path of the country code in the answer of the YouTube country check. */
+    private val SERVICE_CHECK_YOUTUBE_COUNTRY_PATH = listOf(0, 2, 0, 0, 1)
 
     /**
      * Runs every check of one config and returns its report.
      *
-     * The temporary core is always stopped, also when the caller is cancelled.
+     * The YouTube Premium check runs first. When it is not `YES` the other checks are
+     * skipped, their result would be meaningless without Premium. The temporary core is
+     * always stopped, also when the caller is cancelled.
      */
     suspend fun check(context: Context, guid: String): ServiceCheckReport = withContext(Dispatchers.IO) {
+        val tunables = ServiceCheckConfig.load(context)
+        val timestamp = System.currentTimeMillis()
         val port = try {
             Utils.findRandomFreePort()
         } catch (e: IOException) {
             LogUtil.e(AppConfig.TAG, "Service check: no free port for $guid", e)
-            return@withContext ServiceCheckReport(guid, emptyList(), e.message ?: e.javaClass.simpleName)
+            return@withContext ServiceCheckReport(
+                guid = guid,
+                timestamp = timestamp,
+                error = e.message ?: e.javaClass.simpleName,
+            )
         }
 
         val configJson = try {
             buildConfig(context, guid, port)
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Service check: failed to build the config for $guid", e)
-            return@withContext ServiceCheckReport(guid, emptyList(), e.message ?: e.javaClass.simpleName)
+            return@withContext ServiceCheckReport(
+                guid = guid,
+                timestamp = timestamp,
+                error = e.message ?: e.javaClass.simpleName,
+            )
         }
 
         var controller: CoreController? = null
@@ -127,26 +100,72 @@ object ServiceCheckRunner {
             CoreNativeManager.initCoreEnv(context.applicationContext)
             controller = startCore(configJson)
 
-            if (!waitForSocksPort(port, SERVICE_CHECK_PORT_TIMEOUT_MS)) {
-                return@withContext ServiceCheckReport(guid, emptyList(), "SOCKS inbound did not open")
+            if (!waitForSocksPort(port, tunables.portTimeoutMs)) {
+                return@withContext ServiceCheckReport(
+                    guid = guid,
+                    timestamp = timestamp,
+                    error = "SOCKS inbound did not open",
+                )
             }
 
-            val client = buildClient(port)
+            val client = buildClient(port, tunables.timeoutSeconds)
             val results = mutableListOf<ServiceCheckResult>()
-            results += checkExitIp(client)
-            delay(SERVICE_CHECK_INTERVAL_MS)
-            results += checkYoutubePremium(client)
-            ServiceCheckReport(guid, results)
+            var musicBody: String? = null
+
+            val premium = checkYoutubePremium(client, tunables)
+            results += premium
+            if (premium.status == ServiceCheckStatus.YES) {
+                delay(tunables.checkIntervalMs)
+                results += checkGoogleSearchCaptcha(client, tunables)
+
+                delay(tunables.checkIntervalMs)
+                results += checkYoutubeCountry(client, tunables)
+
+                delay(tunables.checkIntervalMs)
+                results += checkGoogleCountry(client, tunables)
+
+                delay(tunables.checkIntervalMs)
+                val music = checkYoutubeMusic(client, tunables)
+                results += music.result
+                musicBody = music.body
+
+                delay(tunables.checkIntervalMs)
+                results += checkExitIp(client, tunables)
+            }
+
+            ServiceCheckReport(
+                guid = guid,
+                timestamp = timestamp,
+                results = results,
+                musicBody = musicBody,
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Service check: failed for $guid", e)
-            ServiceCheckReport(guid, emptyList(), e.message ?: e.javaClass.simpleName)
+            ServiceCheckReport(
+                guid = guid,
+                timestamp = timestamp,
+                error = e.message ?: e.javaClass.simpleName,
+            )
         } finally {
             withContext(NonCancellable) {
                 stopCore(controller, guid)
             }
         }
+    }
+
+    /**
+     * Tells whether the config is usable for YouTube.
+     *
+     * YouTube works when Premium is offered, when the search is not blocked by a
+     * captcha and when YouTube Music is not blocked.
+     */
+    fun isYtOk(report: ServiceCheckReport): Boolean {
+        if (report.result(CHECK_YOUTUBE_PREMIUM)?.status != ServiceCheckStatus.YES) return false
+        if (report.result(CHECK_GOOGLE_SEARCH_CAPTCHA)?.status == ServiceCheckStatus.IPBLOCK) return false
+        if (report.result(CHECK_YOUTUBE_MUSIC)?.status == ServiceCheckStatus.NO) return false
+        return true
     }
 
     /**
@@ -246,27 +265,46 @@ object ServiceCheckRunner {
      * The hostname is resolved by the proxy, so no custom Dns is set. Redirects are not
      * followed, the same way curl does it in ipregion.sh.
      */
-    private fun buildClient(port: Int): OkHttpClient = OkHttpClient.Builder()
+    private fun buildClient(port: Int, timeoutSeconds: Long): OkHttpClient = OkHttpClient.Builder()
         .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(AppConfig.LOOPBACK, port)))
-        .callTimeout(SERVICE_CHECK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .connectTimeout(SERVICE_CHECK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .readTimeout(SERVICE_CHECK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .callTimeout(timeoutSeconds, TimeUnit.SECONDS)
+        .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
+        .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
         .followRedirects(false)
         .followSslRedirects(false)
         .build()
 
     /**
-     * Runs one request and returns its status code and body, null when it failed.
-     *
-     * A connection error is retried once, the same way curl retries with --retry 1.
+     * The answer of one HTTP request.
      */
-    private fun performRequest(client: OkHttpClient, request: Request): Pair<Int, String>? {
+    private data class HttpOutcome(
+        val code: Int,
+        val location: String?,
+        val body: String,
+    )
+
+    /**
+     * Runs one request and returns its status code, its Location header and its body,
+     * null when it failed.
+     *
+     * A connection error is retried once, the same way curl retries with --retry 1. The
+     * body is read up to [maxBodyBytes], a bigger body is not kept.
+     */
+    private fun performRequest(
+        client: OkHttpClient,
+        request: Request,
+        maxBodyBytes: Long,
+    ): HttpOutcome? {
         var attempt = 0
         while (attempt < 2) {
             attempt++
             try {
                 client.newCall(request).execute().use { response ->
-                    return response.code to response.body.string()
+                    return HttpOutcome(
+                        code = response.code,
+                        location = response.header("Location"),
+                        body = readBody(response, maxBodyBytes),
+                    )
                 }
             } catch (e: IOException) {
                 LogUtil.w(AppConfig.TAG, "Service check: request failed, attempt $attempt", e)
@@ -276,22 +314,102 @@ object ServiceCheckRunner {
     }
 
     /**
+     * Reads at most [maxBodyBytes] bytes of the answer body.
+     *
+     * The body is read into a buffer, the same way the browser dialer reads a streamed
+     * answer, so a big answer does not fill the memory of the app. The source is closed
+     * by the response, it is not closed here.
+     */
+    private fun readBody(response: Response, maxBodyBytes: Long): String {
+        val source = response.body.source()
+        val buffer = Buffer()
+        var remaining = maxBodyBytes
+        while (remaining > 0) {
+            val read = source.read(buffer, remaining)
+            if (read <= 0L) break
+            remaining -= read
+        }
+        return buffer.readUtf8()
+    }
+
+    /**
+     * Shortens a body to at most [limitBytes] bytes.
+     *
+     * The limit counts bytes, not characters, so a body of many multi byte characters
+     * is shortened as well.
+     */
+    private fun previewOf(body: String, limitBytes: Long): String {
+        if (limitBytes <= 0L) return ""
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        if (bytes.size <= limitBytes) return body
+        return String(bytes, 0, limitBytes.toInt(), Charsets.UTF_8)
+    }
+
+    /**
+     * Adds the headers of a check to a request.
+     *
+     * A check that sends no user agent gets the default of the HTTP client, the same way
+     * curl sends its own default.
+     */
+    private fun applyHeaders(
+        builder: Request.Builder,
+        definition: ServiceCheckDefinition,
+        tunables: ServiceCheckTunables,
+    ): Request.Builder {
+        if (definition.useUserAgent && tunables.userAgent.isNotBlank()) {
+            builder.header("User-Agent", tunables.userAgent)
+        }
+        definition.headers.forEach { (name, value) -> builder.header(name, value) }
+        return builder
+    }
+
+    /**
+     * The reason of an HTTP answer that ipregion.sh treats as a failure.
+     */
+    private fun httpFailureReason(code: Int): String? = when {
+        code == 403 -> "access denied ($code)"
+        code == 429 -> "rate limited ($code)"
+        code in 500..599 -> "server error ($code)"
+        else -> null
+    }
+
+    /**
+     * The result of a check that could not run because it is not configured.
+     */
+    private fun notConfigured(checkId: String): ServiceCheckResult =
+        ServiceCheckResult(checkId, ServiceCheckStatus.UNKNOWN, reason = "check is not configured")
+
+    /**
      * Reads the exit IP of the config, the body of the page is the address itself.
      */
-    private fun checkExitIp(client: OkHttpClient): ServiceCheckResult {
-        val request = Request.Builder().url(EXIT_IP_URL).get().build()
-        val outcome = performRequest(client, request)
-            ?: return ServiceCheckResult(CHECK_EXIT_IP, ServiceCheckStatus.UNKNOWN, reason = "request failed")
-        val (code, body) = outcome
-        val ip = body.trim()
-        if (code == 200 && isIpAddress(ip)) {
-            return ServiceCheckResult(CHECK_EXIT_IP, ServiceCheckStatus.YES, value = ip, httpCode = code)
+    private fun checkExitIp(
+        client: OkHttpClient,
+        tunables: ServiceCheckTunables,
+    ): ServiceCheckResult {
+        val definition = tunables.definition(CHECK_EXIT_IP) ?: return notConfigured(CHECK_EXIT_IP)
+        val request = applyHeaders(Request.Builder().url(definition.url).get(), definition, tunables).build()
+        val outcome = performRequest(client, request, tunables.bodyPreviewLimitBytes)
+            ?: return ServiceCheckResult(
+                CHECK_EXIT_IP,
+                ServiceCheckStatus.UNKNOWN,
+                reason = "request failed",
+            )
+        val ip = outcome.body.trim()
+        if (outcome.code == 200 && isIpAddress(ip)) {
+            return ServiceCheckResult(
+                CHECK_EXIT_IP,
+                ServiceCheckStatus.YES,
+                value = ip,
+                httpCode = outcome.code,
+                bodyPreview = outcome.body,
+            )
         }
         return ServiceCheckResult(
             CHECK_EXIT_IP,
             ServiceCheckStatus.UNKNOWN,
             reason = "unexpected response",
-            httpCode = code,
+            httpCode = outcome.code,
+            bodyPreview = outcome.body,
         )
     }
 
@@ -304,36 +422,288 @@ object ServiceCheckRunner {
     /**
      * Asks the YouTube InnerTube API whether Premium is offered for the exit IP.
      */
-    private fun checkYoutubePremium(client: OkHttpClient): ServiceCheckResult {
-        val body = YOUTUBE_PREMIUM_BODY.toByteArray()
+    private fun checkYoutubePremium(
+        client: OkHttpClient,
+        tunables: ServiceCheckTunables,
+    ): ServiceCheckResult {
+        val definition = tunables.definition(CHECK_YOUTUBE_PREMIUM)
+            ?: return notConfigured(CHECK_YOUTUBE_PREMIUM)
+        val body = definition.body.orEmpty().toByteArray()
             .toRequestBody("application/json".toMediaTypeOrNull())
-        // curl's --json sets both the content type and the accept header.
-        val request = Request.Builder()
-            .url(YOUTUBE_PREMIUM_URL)
-            .header("Accept", "application/json")
-            .post(body)
-            .build()
-        val outcome = performRequest(client, request)
+        val request = applyHeaders(
+            Request.Builder().url(definition.url),
+            definition,
+            tunables,
+        ).post(body).build()
+        val outcome = performRequest(client, request, tunables.bodyPreviewLimitBytes)
             ?: return ServiceCheckResult(
                 CHECK_YOUTUBE_PREMIUM,
                 ServiceCheckStatus.UNKNOWN,
                 reason = "request failed",
             )
-        val (code, responseBody) = outcome
-        if (code != 200) {
+        if (outcome.code != 200) {
             return ServiceCheckResult(
                 CHECK_YOUTUBE_PREMIUM,
                 ServiceCheckStatus.UNKNOWN,
-                reason = "http $code",
-                httpCode = code,
+                reason = httpFailureReason(outcome.code) ?: "unexpected response",
+                httpCode = outcome.code,
+                bodyPreview = outcome.body,
             )
         }
-        val status = if (responseBody.contains(YOUTUBE_PREMIUM_MARKER)) {
+        val marker = definition.marker.orEmpty()
+        val status = if (marker.isNotEmpty() && outcome.body.contains(marker)) {
             ServiceCheckStatus.YES
         } else {
             ServiceCheckStatus.NO
         }
-        return ServiceCheckResult(CHECK_YOUTUBE_PREMIUM, status, httpCode = code)
+        return ServiceCheckResult(
+            CHECK_YOUTUBE_PREMIUM,
+            status,
+            httpCode = outcome.code,
+            bodyPreview = outcome.body,
+        )
+    }
+
+    /**
+     * Reads the country code of the exit IP from the YouTube country answer.
+     */
+    private fun checkYoutubeCountry(
+        client: OkHttpClient,
+        tunables: ServiceCheckTunables,
+    ): ServiceCheckResult {
+        val definition = tunables.definition(CHECK_YOUTUBE_COUNTRY)
+            ?: return notConfigured(CHECK_YOUTUBE_COUNTRY)
+        val request = applyHeaders(Request.Builder().url(definition.url).get(), definition, tunables).build()
+        val outcome = performRequest(client, request, tunables.bodyPreviewLimitBytes)
+            ?: return ServiceCheckResult(
+                CHECK_YOUTUBE_COUNTRY,
+                ServiceCheckStatus.UNKNOWN,
+                reason = "request failed",
+            )
+        val failure = httpFailureReason(outcome.code)
+        if (failure != null) {
+            return ServiceCheckResult(
+                CHECK_YOUTUBE_COUNTRY,
+                ServiceCheckStatus.UNKNOWN,
+                reason = failure,
+                httpCode = outcome.code,
+                locationHeader = outcome.location,
+                bodyPreview = outcome.body,
+            )
+        }
+        val prefix = definition.jsonPrefix.orEmpty()
+        val json = if (prefix.isNotEmpty() && outcome.body.startsWith(prefix)) {
+            outcome.body.substring(prefix.length)
+        } else {
+            outcome.body
+        }
+        val country = extractYoutubeCountry(json)
+        if (outcome.code == 200 && country != null && SERVICE_CHECK_COUNTRY_PATTERN.matches(country)) {
+            return ServiceCheckResult(
+                CHECK_YOUTUBE_COUNTRY,
+                ServiceCheckStatus.YES,
+                value = country,
+                httpCode = outcome.code,
+                bodyPreview = outcome.body,
+            )
+        }
+        return ServiceCheckResult(
+            CHECK_YOUTUBE_COUNTRY,
+            ServiceCheckStatus.UNKNOWN,
+            reason = "unexpected response",
+            httpCode = outcome.code,
+            bodyPreview = outcome.body,
+        )
+    }
+
+    /**
+     * Reads the country code of the exit IP from the YouTube country answer.
+     *
+     * The answer is a JSON array, the country code is at the path [0][2][0][0][1].
+     */
+    private fun extractYoutubeCountry(json: String): String? {
+        val root = runCatching { JsonParser.parseString(json) }.getOrNull() ?: return null
+        var current: JsonElement = root
+        for (index in SERVICE_CHECK_YOUTUBE_COUNTRY_PATH) {
+            val array = current as? JsonArray ?: return null
+            if (index >= array.size()) return null
+            current = array.get(index)
+        }
+        if (!current.isJsonPrimitive) return null
+        return runCatching { current.asString }.getOrNull()
+    }
+
+    /**
+     * Reads the country code of the exit IP from the Google sign-in answer.
+     */
+    private fun checkGoogleCountry(
+        client: OkHttpClient,
+        tunables: ServiceCheckTunables,
+    ): ServiceCheckResult {
+        val definition = tunables.definition(CHECK_GOOGLE_COUNTRY)
+            ?: return notConfigured(CHECK_GOOGLE_COUNTRY)
+        val pattern = definition.countryPattern?.let { runCatching { Regex(it) }.getOrNull() }
+            ?: return notConfigured(CHECK_GOOGLE_COUNTRY)
+        val request = applyHeaders(Request.Builder().url(definition.url).get(), definition, tunables).build()
+        val outcome = performRequest(client, request, tunables.bodyPreviewLimitBytes)
+            ?: return ServiceCheckResult(
+                CHECK_GOOGLE_COUNTRY,
+                ServiceCheckStatus.UNKNOWN,
+                reason = "request failed",
+            )
+        val failure = httpFailureReason(outcome.code)
+        if (failure != null) {
+            return ServiceCheckResult(
+                CHECK_GOOGLE_COUNTRY,
+                ServiceCheckStatus.UNKNOWN,
+                reason = failure,
+                httpCode = outcome.code,
+                locationHeader = outcome.location,
+                bodyPreview = outcome.body,
+            )
+        }
+        val country = pattern.find(outcome.body)?.groupValues?.getOrNull(1)
+        if (outcome.code == 200 && country != null && SERVICE_CHECK_COUNTRY_PATTERN.matches(country)) {
+            return ServiceCheckResult(
+                CHECK_GOOGLE_COUNTRY,
+                ServiceCheckStatus.YES,
+                value = country,
+                httpCode = outcome.code,
+                bodyPreview = outcome.body,
+            )
+        }
+        return ServiceCheckResult(
+            CHECK_GOOGLE_COUNTRY,
+            ServiceCheckStatus.UNKNOWN,
+            reason = "unexpected response",
+            httpCode = outcome.code,
+            bodyPreview = outcome.body,
+        )
+    }
+
+    /**
+     * Checks whether Google shows a captcha for the exit IP.
+     */
+    private fun checkGoogleSearchCaptcha(
+        client: OkHttpClient,
+        tunables: ServiceCheckTunables,
+    ): ServiceCheckResult {
+        val definition = tunables.definition(CHECK_GOOGLE_SEARCH_CAPTCHA)
+            ?: return notConfigured(CHECK_GOOGLE_SEARCH_CAPTCHA)
+        val request = applyHeaders(Request.Builder().url(definition.url).get(), definition, tunables).build()
+        val outcome = performRequest(client, request, tunables.bodyPreviewLimitBytes)
+            ?: return ServiceCheckResult(
+                CHECK_GOOGLE_SEARCH_CAPTCHA,
+                ServiceCheckStatus.UNKNOWN,
+                reason = "request failed",
+            )
+        val captchaPath = definition.captchaPath.orEmpty()
+        val isCaptcha = (captchaPath.isNotEmpty() && outcome.location?.contains(captchaPath) == true) ||
+            outcome.code == 429
+        if (isCaptcha) {
+            return ServiceCheckResult(
+                CHECK_GOOGLE_SEARCH_CAPTCHA,
+                ServiceCheckStatus.IPBLOCK,
+                reason = "captcha",
+                httpCode = outcome.code,
+                locationHeader = outcome.location,
+                bodyPreview = outcome.body,
+            )
+        }
+        val noJsMarker = definition.noJsMarker.orEmpty()
+        if (outcome.code == 200 && noJsMarker.isNotEmpty() && outcome.body.contains(noJsMarker)) {
+            return ServiceCheckResult(
+                CHECK_GOOGLE_SEARCH_CAPTCHA,
+                ServiceCheckStatus.YES,
+                httpCode = outcome.code,
+                locationHeader = outcome.location,
+                bodyPreview = outcome.body,
+            )
+        }
+        return ServiceCheckResult(
+            CHECK_GOOGLE_SEARCH_CAPTCHA,
+            ServiceCheckStatus.UNKNOWN,
+            reason = httpFailureReason(outcome.code) ?: "unexpected response",
+            httpCode = outcome.code,
+            locationHeader = outcome.location,
+            bodyPreview = outcome.body,
+        )
+    }
+
+    /**
+     * The answer of the YouTube Music check.
+     */
+    private data class MusicOutcome(
+        val result: ServiceCheckResult,
+        val body: String?,
+    )
+
+    /**
+     * Checks whether YouTube Music is available for the exit IP.
+     *
+     * The marker lists are empty by default, so the check answers `UNKNOWN` until the
+     * user fills them in the asset file. The whole body is captured, the user needs it
+     * to find the "not available in your area" message.
+     */
+    private fun checkYoutubeMusic(
+        client: OkHttpClient,
+        tunables: ServiceCheckTunables,
+    ): MusicOutcome {
+        val definition = tunables.definition(CHECK_YOUTUBE_MUSIC)
+            ?: return MusicOutcome(notConfigured(CHECK_YOUTUBE_MUSIC), null)
+        val request = applyHeaders(Request.Builder().url(definition.url).get(), definition, tunables).build()
+        val outcome = performRequest(client, request, tunables.musicBodyLimitBytes)
+            ?: return MusicOutcome(
+                ServiceCheckResult(
+                    CHECK_YOUTUBE_MUSIC,
+                    ServiceCheckStatus.UNKNOWN,
+                    reason = "request failed",
+                ),
+                null,
+            )
+        val preview = previewOf(outcome.body, tunables.bodyPreviewLimitBytes)
+        val blocked = definition.blockedMarkers.firstOrNull { marker ->
+            marker.isNotEmpty() && outcome.body.contains(marker)
+        }
+        if (blocked != null) {
+            return MusicOutcome(
+                ServiceCheckResult(
+                    CHECK_YOUTUBE_MUSIC,
+                    ServiceCheckStatus.NO,
+                    reason = "blocked marker",
+                    httpCode = outcome.code,
+                    locationHeader = outcome.location,
+                    bodyPreview = preview,
+                ),
+                outcome.body,
+            )
+        }
+        val available = definition.availableMarkers.firstOrNull { marker ->
+            marker.isNotEmpty() && outcome.body.contains(marker)
+        }
+        if (available != null) {
+            return MusicOutcome(
+                ServiceCheckResult(
+                    CHECK_YOUTUBE_MUSIC,
+                    ServiceCheckStatus.YES,
+                    httpCode = outcome.code,
+                    locationHeader = outcome.location,
+                    bodyPreview = preview,
+                ),
+                outcome.body,
+            )
+        }
+        return MusicOutcome(
+            ServiceCheckResult(
+                CHECK_YOUTUBE_MUSIC,
+                ServiceCheckStatus.UNKNOWN,
+                reason = httpFailureReason(outcome.code) ?: "no marker matched",
+                httpCode = outcome.code,
+                locationHeader = outcome.location,
+                bodyPreview = preview,
+            ),
+            outcome.body,
+        )
     }
 
     /**

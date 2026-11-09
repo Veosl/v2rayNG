@@ -42,6 +42,7 @@ interface MainDataSource : Closeable {
 
     fun clearAllTestDelayResults(guids: List<String>)
     fun sortByTestResultsForSub(subId: String)
+    fun clearServiceCheckResults()
     fun getSubsList(): List<String>
 
     suspend fun importBatchConfig(

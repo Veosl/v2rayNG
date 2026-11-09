@@ -23,6 +23,7 @@ import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.extension.isGroupType
 import com.v2ray.ang.dto.entities.RulesetItem
 import com.v2ray.ang.dto.entities.ServerAffiliationInfo
+import com.v2ray.ang.dto.entities.ServiceCheckReport
 import com.v2ray.ang.dto.entities.SubscriptionCache
 import com.v2ray.ang.dto.entities.SubscriptionItem
 import com.v2ray.ang.dto.entities.WebDavConfig
@@ -42,6 +43,7 @@ object MmkvManager {
     private const val ID_PROFILE_FULL_CONFIG = "PROFILE_FULL_CONFIG"
     private const val ID_SERVER_RAW = "SERVER_RAW"
     private const val ID_SERVER_AFF = "SERVER_AFF"
+    private const val ID_SERVICE_CHECK = "SERVICE_CHECK"
     private const val ID_SUB = "SUB"
     private const val ID_ASSET = "ASSET"
     private const val ID_SETTING = "SETTING"
@@ -73,6 +75,7 @@ object MmkvManager {
     private val profileFullStorage by lazy { MMKV.mmkvWithID(ID_PROFILE_FULL_CONFIG, MMKV.MULTI_PROCESS_MODE) }
     private val serverRawStorage by lazy { MMKV.mmkvWithID(ID_SERVER_RAW, MMKV.MULTI_PROCESS_MODE) }
     private val serverAffStorage by lazy { MMKV.mmkvWithID(ID_SERVER_AFF, MMKV.MULTI_PROCESS_MODE) }
+    private val serviceCheckStorage by lazy { MMKV.mmkvWithID(ID_SERVICE_CHECK, MMKV.MULTI_PROCESS_MODE) }
     private val subStorage by lazy { MMKV.mmkvWithID(ID_SUB, MMKV.MULTI_PROCESS_MODE) }
     private val assetStorage by lazy { MMKV.mmkvWithID(ID_ASSET, MMKV.MULTI_PROCESS_MODE) }
     private val settingsStorage by lazy { MMKV.mmkvWithID(ID_SETTING, MMKV.MULTI_PROCESS_MODE) }
@@ -94,6 +97,7 @@ object MmkvManager {
         profileFullStorage.removeValuesForKeys(keys)
         serverAffStorage.removeValuesForKeys(keys)
         serverRawStorage.removeValuesForKeys(keys)
+        removeServiceCheckReports(guids)
     }
 
     private fun requireStorageWrite(success: Boolean, message: String) {
@@ -409,6 +413,7 @@ object MmkvManager {
         }
         profileFullStorage.remove(guid)
         serverAffStorage.remove(guid)
+        removeServiceCheckReports(listOf(guid))
     }
 
     /**
@@ -427,6 +432,7 @@ object MmkvManager {
             }
             profileFullStorage.remove(guid)
             serverAffStorage.remove(guid)
+            removeServiceCheckReports(listOf(guid))
         }
 
         serverList.clear()
@@ -455,6 +461,7 @@ object MmkvManager {
             profileFullStorage.remove(guid)
             serverAffStorage.remove(guid)
             serverRawStorage.remove(guid)
+            removeServiceCheckReports(listOf(guid))
         }
     }
 
@@ -505,6 +512,55 @@ object MmkvManager {
     }
 
     /**
+     * Writes the report of a service check.
+     *
+     * The service check has its own store, it never touches the real delay result of
+     * the profile.
+     *
+     * @param report The report of one profile.
+     */
+    fun encodeServiceCheckReport(report: ServiceCheckReport) {
+        if (report.guid.isBlank()) {
+            return
+        }
+        serviceCheckStorage.encode(report.guid, JsonUtil.toJson(report))
+    }
+
+    /**
+     * Reads the report of a service check.
+     *
+     * @param guid The GUID of the profile.
+     * @return The report of the profile, or null when it was never checked.
+     */
+    fun decodeServiceCheckReport(guid: String): ServiceCheckReport? {
+        if (guid.isBlank()) {
+            return null
+        }
+        val json = serviceCheckStorage.decodeString(guid)
+        if (json.isNullOrBlank()) {
+            return null
+        }
+        return JsonUtil.fromJsonSafe(json, ServiceCheckReport::class.java)
+    }
+
+    /**
+     * Removes the reports of the given profiles.
+     *
+     * @param guids The GUIDs of the profiles.
+     */
+    fun removeServiceCheckReports(guids: Collection<String>) {
+        if (guids.isEmpty()) return
+        serviceCheckStorage.removeValuesForKeys(guids.toTypedArray())
+    }
+
+    /**
+     * Removes every service check report.
+     */
+    fun clearServiceCheckReports() {
+        serviceCheckStorage.clearAll()
+    }
+
+    /**
      * Removes all server configurations.
      *
      * @return The number of server configurations removed.
@@ -514,6 +570,7 @@ object MmkvManager {
         profileFullStorage.clearAll()
         serverAffStorage.clearAll()
         serverRawStorage.clearAll()
+        serviceCheckStorage.clearAll()
 
         decodeSubscriptions().forEach { sub ->
             encodeServerList(mutableListOf(), sub.guid)
@@ -612,6 +669,7 @@ object MmkvManager {
                 profileFullStorage.removeValuesForKeys(keys)
                 serverAffStorage.removeValuesForKeys(keys)
                 serverRawStorage.removeValuesForKeys(keys)
+                removeServiceCheckReports(orphans)
             }
             orphans.size
         } finally {
