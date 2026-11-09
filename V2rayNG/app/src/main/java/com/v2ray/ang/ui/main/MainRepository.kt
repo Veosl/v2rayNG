@@ -125,6 +125,9 @@ class MainRepository(
     override fun isGroupAllDisplayEnabled(): Boolean =
         MmkvManager.decodeSettingsBool(AppConfig.PREF_GROUP_ALL_DISPLAY)
 
+    override fun isSortWhileTestingEnabled(): Boolean =
+        MmkvManager.decodeSettingsBool(AppConfig.PREF_SORT_WHILE_TESTING, true)
+
     override fun getString(resId: Int): String = localizedContext.getString(resId)
 
     override fun getString(resId: Int, vararg formatArgs: Any): String =

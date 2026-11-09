@@ -191,6 +191,8 @@
     <string name="summary_pref_auto_remove_invalid_after_test">Test results may not be accurate; deleted config cannot be recovered.</string>
     <string name="title_pref_auto_sort_after_test">Auto sort after testing</string>
     <string name="summary_pref_auto_sort_after_test">Test results may not be accurate;</string>
+    <string name="title_pref_sort_while_testing">Sort while testing</string>
+    <string name="summary_pref_sort_while_testing">Reorder the list while a real delay test is running. The list is not reordered while you scroll it.</string>
 
     <string name="title_mux_settings">Mux Settings</string>
     <string name="title_pref_mux_enabled">Enable Mux</string>

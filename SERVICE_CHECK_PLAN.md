@@ -10,12 +10,19 @@ Source of truth for the HTTP behaviour: [`IPREGION_PORT_SPEC.md`](IPREGION_PORT_
 Rules that apply to the whole task:
 
 * No new dependencies (OkHttp, Gson, MMKV, Compose, coroutines are already present).
-* No foreground service. Results live in the ViewModel (Stage 2) / MMKV (Stage 3).
+* No foreground service for the service check. Results live in a manager / MMKV.
 * No unit tests (explicit user instruction for this task).
 * Never touch `.github/`.
-* Every visible string lives in `strings.xml` and is localized in every locale listed in
-  `androidResources.localeFilters`.
+* New strings go into the **default `values/strings.xml` only (English)**. The locale files
+  are not touched. Every user-visible text must be a string resource.
 * Identify profiles by GUID, never by list index.
+* Real-delay results (`ServerAffiliationInfo.testDelayMillis`) must never be deleted or
+  overwritten by anything new. Service check data goes in its own storage.
+* Before using any API, find an existing usage in this repo and copy the pattern. If there
+  is none, say so in the report.
+* Commit locally on the current branch with
+  `git -c user.name="OpenCode Agent" -c user.email="agent@localhost" commit`. Never push,
+  never change the git config, remotes or branches.
 
 ---
 
@@ -64,26 +71,171 @@ Rules that apply to the whole task:
       the checks of one profile.
 * [x] 2.11 Results are in memory only.
 
-## Stage 3 — Everything else
+## Stage A — real-delay list behaviour (scroll lag + live sorting)
 
-* [ ] 3.1 Add `V2rayNG/app/src/main/assets/ipregion_checks.json` with the parameters of
-      every check (URLs, UA, headers, cookies, regexes, marker lists, timeouts), loaded
-      with Gson. The decision logic stays in Kotlin.
-* [ ] 3.2 Add the remaining checks: `google_country`, `youtube_country`,
-      `google_search_captcha`, `youtube_music_experimental`.
-* [ ] 3.3 Result data per check: `checkId`, `status` (YES/NO/IPBLOCK/UNKNOWN), `value`,
-      `reason`, `httpCode`, `locationHeader`, `bodyPreview` (first 2048 chars, always
-      captured).
-* [ ] 3.4 Persist the per-profile results in a new MMKV store following the `MmkvManager`
-      pattern, plus a **Clear results** action.
-* [ ] 3.5 Badge row per profile (Google country, YouTube country, Premium, captcha,
-      Music) and best-first sort: score = 2 if `youtube_premium` is YES, +1 if
-      `google_search_captcha` is YES.
-* [ ] 3.6 Detail screen per profile: every check with status, value, HTTP code, Location
-      header and body preview as selectable text plus a **Copy** button, and a
-      **Use this config** button that makes the profile the active server.
-* [ ] 3.7 Add ipregion's MIT license text (spec section 6) and the credit to
-      `V2rayNG/app/src/main/assets/open_source_licenses.html`.
+### A1. Scroll lag while a real-delay test runs
+
+* [x] A1.1 **Trace** one real-delay result from `CoreTestService` (the `:tasks` process) to
+      the screen: where the message arrives in the UI process, what it does (MMKV write?
+      full list reload? JSON decoding of every profile?), on which thread, and how often it
+      triggers recomposition. Report the trace with file:line.
+* [x] A1.2 Check the hypotheses against the code (they are guesses, not facts):
+      (a) every result triggers a reload and decode of the whole server list on the main
+      thread; (b) every result creates a new list so all rows recompose; (c) rows are not
+      keyed by guid or the row model is not stable; (d) results arrive in a burst with no
+      batching.
+* [x] A1.3 Fix only what can be proved: batch result updates and flush at most every
+      400 ms; update only the changed rows; do decoding and MMKV work off the main thread;
+      use stable keys (guid) and stable/immutable row models. If there is no concrete
+      cause, say so and make **no** speculative change. Do **not** change the concurrency
+      setting.
+
+### A2. Live sorting
+
+* [x] A2.1 Find the existing “sort after test” setting and the existing
+      `SortByTestResults` logic. **Leave them unchanged.**
+* [x] A2.2 New switch setting **“Sort while testing”**, default **ON**, next to the
+      “sort after test” setting.
+* [x] A2.3 While a real-delay test runs (started from any trigger), re-sort the list by
+      test result with the **same** ordering logic, at most once per **1.5 s**, only if at
+      least one new valid result (delay > 0) arrived since the last sort, and never while
+      the user is touching or scrolling the list (defer until the scroll stops).
+* [x] A2.4 Switch OFF: behaviour is exactly as today.
+* [x] A2.5 The sort must not run on the main thread when it touches MMKV or does heavy
+      work.
+
+### Stage A findings (for the report)
+
+* Trace: `CoreTestService.kt:154` writes the delay to MMKV in the `:tasks` process and
+  `CoreTestService.kt:157` broadcasts `MSG_MEASURE_CONFIG_SUCCESS`; the broadcast is
+  received by `MainRepository.kt:65-67`, pushed into an unlimited channel
+  (`MainRepository.kt:43`) and collected in `MainViewModel.collectServiceEvents`
+  (`MainViewModel.kt:130`). No list reload and no profile decoding happens per result.
+* (a) **False** — the per-result path never reloads or decodes the server list.
+* (b) **Partly true** — a new `List` is created per flush, but only the changed rows get a
+  new instance (`applyTestDelayResultsToRows`). The **progress text** however updated
+  `_uiState.status` per result, which recomposed the whole `MainScreen`/list per result.
+* (c) **True for the model** — the rows were keyed by guid already, but `ServerRowUiModel`
+  contained `ProfileItem` (56 `var` properties ⇒ Compose-inferred unstable) and
+  `ServerRowActions` was rebuilt on every parent recomposition, so every visible row
+  recomposed.
+* (d) **Partly true** — the delay values were already batched (500 ms), the progress text
+  was not.
+
+### Stage A implementation
+
+* Progress text is now published with the delay flush (`pendingTestProgress`,
+  `flushPendingTestResults`), so a burst causes at most one screen update per 500 ms.
+* `ServerRowUiModel` no longer holds `ProfileItem`; the row model is now a stable data
+  class of immutable values. The profile for the edit/share/more actions is resolved via
+  `MainViewModel.profileInGroup(groupId, guid)`.
+* `ServerRowActions` is created once per group (`remember(groupId)`) and reads the
+  callbacks through `rememberUpdatedState`, so the row composables can be skipped.
+* The live sort watcher ticks every 500 ms, checks the conditions on the main thread and
+  runs `AngConfigManager.sortByTestResultsForSub` (the existing ordering logic) on the IO
+  dispatcher. The new order is applied by re-ordering the existing rows, so the row
+  instances survive the sort.
+* New setting `AppConfig.PREF_SORT_WHILE_TESTING`, default `true`, switch next to
+  “Auto sort after testing” in the subscription update dialog.
+
+## Stage B — service check results on the main page; remove the Service check page
+
+* [ ] B1. Remove the Service check page completely: `ServiceCheckActivity` /
+      `ServiceCheckViewModel` / `ServiceCheckContract`, its manifest entry, the
+      “Service check” menu entry and everything that exists only for it
+      (`MainMoreMenuAction.ServiceCheck`, `MainAction.ServiceCheck`, handlers, unused
+      strings). Prove with grep that nothing references them any more. **Keep
+      `ServiceCheckRunner`.**
+* [ ] B2. Application-scoped manager. `object ServiceCheckManager` with its own
+      `CoroutineScope(SupervisorJob + Dispatchers.Default)` and a `StateFlow` of run state
+      (running, done, total, goodCount). It queues configs and runs `ServiceCheckRunner`
+      on them with `SERVICE_CHECK_CONCURRENCY = 3`. A run survives the main activity being
+      recreated. Expose `start(guids)`, `enqueue(guid)`, `cancel()`.
+* [ ] B3. Checks. Keep `exit_ip` and `youtube_premium`. Add `google_country`,
+      `youtube_country`, `google_search_captcha`, `youtube_music_experimental`. Source of
+      truth: `reference/ipregion.sh`, then the spec and its errata. Where the script sends
+      no `User-Agent`, send none. All checks use `followRedirects(false)`.
+      * Order per config: `youtube_premium` first. If it is not YES, store the result and
+        **skip** the rest. If YES, run `google_search_captcha`, `youtube_country`,
+        `google_country`, `youtube_music_experimental`, `exit_ip`, about 300 ms apart.
+      * “YT OK” = premium YES **and** captcha != IPBLOCK **and** music != NO. One
+        function.
+      * `youtube_music_experimental`: GET `https://music.youtube.com/` with the SOCS/PREF
+        cookie and the same headers as the spec's YouTube requests. `blockedMarkers` and
+        `availableMarkers` live in `V2rayNG/app/src/main/assets/ipregion_checks.json`,
+        **empty** by default. A blocked match gives NO, an available match gives YES,
+        otherwise UNKNOWN. Capture up to 64 KB of its body.
+      * `ipregion_checks.json` holds only tunables (URLs, headers, UA, regexes, marker
+        lists, timeouts). The logic stays in Kotlin. Use the JSON library already in the
+        project.
+* [ ] B4. Persistence. A new MMKV store following the `MmkvManager` pattern, key = guid,
+      value = JSON of a report (timestamp + per-check results: status
+      YES/NO/IPBLOCK/UNKNOWN, value, reason, httpCode, locationHeader, bodyPreview up to
+      4 KB, plus the full captured music body in a separate field). Delete a profile's
+      report wherever its `ServerAffiliationInfo` is removed (delete one, delete
+      duplicates, delete invalid, delete all). Add **“Clear service check results”** to the
+      more-menu.
+* [ ] B5. Main list row. Append to the existing delay display, without changing the row
+      height or removing anything:
+      * the 2-letter exit country (YouTube country, else Google country), small text;
+      * a “YT” chip: green = YT OK, red = premium NO, orange = captcha/IPBLOCK,
+        grey = checked but unknown or error, hidden if never checked;
+      * a tiny “M” chip only when the music status is YES (green) or NO (red).
+      Chips must handle RTL, long remarks (ellipsis) and dark/light theme (theme colors).
+      The report includes an ASCII sketch of the row before and after.
+* [ ] B6. Details. Add **“Service check details”** to the row's existing overflow menu
+      (find it; if none exists, use the existing long-press menu). It opens a dialog or
+      bottom sheet showing, per check: status, value, HTTP code, Location header and the
+      first 4 KB of the body preview as selectable text, with a **Copy** button per check
+      that copies the **full** captured body.
+* [ ] B7. Add ipregion's MIT license text (spec section 6) and the credit to
+      `assets/open_source_licenses.html`, following its structure.
+
+## Stage C — “YT” button and long-press auto-connect
+
+### Shared rules
+
+* One run at a time. Starting any run cancels the previous one (use the existing cancel
+  path for real-delay tests). Cancelling never disconnects the VPN.
+* Use the **same** code path as the existing connect button and as tapping another config
+  for selecting and (re)starting the VPN, including the VPN permission flow. Find it and
+  reuse it; do not write a new start path.
+* User override: remember the guid the auto logic selected last. Before any auto switch,
+  if the currently selected server differs from it, or the user disconnected, **stop** all
+  auto switching for the rest of the run. Testing and marking continue.
+* Keep the screen on while a run is active. Show a Toast or Snackbar on every auto
+  connect or switch (“Connected: `<remark>`”).
+* Put all thresholds as constants in one place.
+
+### C1. “YT” button
+
+* A small FAB with the text **“YT”**, directly left of the connect FAB, vertically
+  aligned with it. It must not overlap the last list item (check how the list bottom
+  padding handles the connect FAB). Do not change the connect FAB's behaviour or colours.
+* Tap: start a run on **all** configs of the current subscription group. Real delay test
+  (existing mechanism); every config whose result has delay > 0 is enqueued to
+  `ServiceCheckManager` as soon as its result arrives (do not wait for the whole test).
+  When the first config is “YT OK”: select it and connect (unless the user override rule
+  applies). Keep testing everything; do **not** switch to later ones. Update the main list
+  rows as results come in.
+* While running: the button shows a progress indicator and a second tap cancels the run.
+
+### C2. Long-press on the connect FAB: auto-connect to the fastest
+
+* Show haptic feedback plus a Toast, and add an `onLongClickLabel`. A plain tap keeps
+  its current behaviour. `FloatingActionButton` has no long-click, so find an existing
+  pattern in this repo, or use `combinedClickable` / `detectTapGestures` on the same shape.
+* Start a real delay test on the current group. **No** service checks in this mode.
+* Not connected: connect to the **first** result with delay > 0 immediately. Keep testing.
+  Later, switch only when a result is at least **30 % faster** than the connected config's
+  delay **and** at least **50 ms** faster, with at least **10 s** since the last switch and
+  at most **3** switches per run.
+* Connected: the baseline is the connected config's delay **from this run**. Until it
+  arrives, remember the best candidate. If the connected config fails (no delay), switch
+  to the best candidate. Otherwise apply the 30 % / 50 ms rule.
+* Implement the decision logic as a small **pure Kotlin class** (inputs: connected guid,
+  its delay, candidate guid and delay, time of the last switch, switch count; output:
+  switch or not) with no Android dependencies, used by the run code.
 
 ---
 

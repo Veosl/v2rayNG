@@ -1,6 +1,7 @@
 package com.v2ray.ang.ui.main
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -106,6 +108,12 @@ class MainViewModel(
     private var reloadJob: Job? = null
     private var testResultFlushJob: Job? = null
     private val pendingTestResults = linkedMapOf<String, Long>()
+    private var pendingTestProgress: String? = null
+
+    private var liveSortJob: Job? = null
+    private var liveSortHasNewResult = false
+    private var liveSortLastAtMs = 0L
+    private var listScrolling = false
 
     private val testRequests = MainTestRequests()
     private var bulkTestJob: Job? = null
@@ -156,9 +164,8 @@ class MainViewModel(
             }
 
             is MainServiceEvent.MeasureConfigNotify -> {
-                if (event.requestId == testRequests.bulk?.id) {
-                    _uiState.update { it.copy(status = MainStatus.TestProgress(event.progress)) }
-                }
+                val request = testRequests.bulk?.takeIf { it.id == event.requestId } ?: return
+                queueTestProgress(event.progress, request)
             }
 
             is MainServiceEvent.MeasureConfigFinish -> {
@@ -187,10 +194,26 @@ class MainViewModel(
 
     private fun queueTestResult(result: RealPingResult, request: MainTestRequests.Bulk) {
         pendingTestResults[result.guid] = result.delayMillis
+        if (result.delayMillis > 0L) {
+            liveSortHasNewResult = true
+        }
+        scheduleTestResultFlush(request)
+    }
+
+    /**
+     * Stores the newest progress text. It is published with the next flush, so a burst
+     * of results does not update the whole screen once per result.
+     */
+    private fun queueTestProgress(progress: String, request: MainTestRequests.Bulk) {
+        pendingTestProgress = progress
+        scheduleTestResultFlush(request)
+    }
+
+    private fun scheduleTestResultFlush(request: MainTestRequests.Bulk) {
         if (testResultFlushJob?.isActive == true) return
 
         testResultFlushJob = viewModelScope.launch {
-            while (pendingTestResults.isNotEmpty()) {
+            while (pendingTestResults.isNotEmpty() || pendingTestProgress != null) {
                 delay(TEST_RESULT_FLUSH_INTERVAL_MS)
                 flushPendingTestResults(request)
             }
@@ -198,9 +221,10 @@ class MainViewModel(
     }
 
     private suspend fun flushPendingTestResults(request: MainTestRequests.Bulk) {
-        if (pendingTestResults.isEmpty()) return
         if (testRequests.bulk?.id != request.id) return
 
+        val progress = pendingTestProgress
+        pendingTestProgress = null
         val updates = cacheMutex.withLock {
             val drained = pendingTestResults.toMap()
             pendingTestResults.clear()
@@ -209,13 +233,16 @@ class MainViewModel(
             }
             drained
         }
-        if (updates.isEmpty()) return
-        if (testRequests.bulk?.id != request.id) return
-        mutableServerGroupState(request.groupId).update { current ->
-            current.copy(
-                servers = applyTestDelayResults(current.servers, updates),
-                rows = applyTestDelayResultsToRows(current.rows, updates),
-            )
+        if (updates.isNotEmpty() && testRequests.bulk?.id == request.id) {
+            mutableServerGroupState(request.groupId).update { current ->
+                current.copy(
+                    servers = applyTestDelayResults(current.servers, updates),
+                    rows = applyTestDelayResultsToRows(current.rows, updates),
+                )
+            }
+        }
+        if (progress != null && testRequests.bulk?.id == request.id) {
+            _uiState.update { it.copy(status = MainStatus.TestProgress(progress)) }
         }
     }
 
@@ -291,6 +318,7 @@ class MainViewModel(
             is MainAction.SelectServer -> updateSelectedGuid(action.guid)
             is MainAction.RemoveServer -> removeServerAndRefresh(action.guid)
             is MainAction.Search -> filterConfig(action.query)
+            is MainAction.SetListScrolling -> setListScrolling(action.active)
             is MainAction.ImportBatchConfig -> importBatchConfig(action.configText)
             MainAction.LocateHandled -> consumeLocateTarget()
             is MainAction.ShareQRCode -> {
@@ -710,11 +738,11 @@ class MainViewModel(
         }
     }
 
-    private fun sortByTestResultsInternal() {
-        val subs = if (uiState.value.selectedGroupId.isEmpty()) {
+    private fun sortByTestResultsInternal(groupId: String = uiState.value.selectedGroupId) {
+        val subs = if (groupId.isEmpty()) {
             dataSource.getSubsList()
         } else {
-            listOf(uiState.value.selectedGroupId)
+            listOf(groupId)
         }
         subs.forEach { dataSource.sortByTestResultsForSub(it) }
     }
@@ -815,6 +843,101 @@ class MainViewModel(
         }
     }
 
+    // ---------- Live sorting while a real-delay test runs ----------
+    /**
+     * Starts the watcher that re-sorts the list while a real-delay test runs.
+     *
+     * The watcher only evaluates the conditions on the main thread. The sort itself runs
+     * on the IO dispatcher, because it reads and writes MMKV.
+     */
+    private fun startLiveSortWatcher(groupId: String) {
+        stopLiveSortWatcher()
+        liveSortHasNewResult = false
+        liveSortLastAtMs = 0L
+        liveSortJob = viewModelScope.launch {
+            // The setting lives in MMKV, so it is read off the main thread.
+            val enabled = withContext(ioDispatcher) { dataSource.isSortWhileTestingEnabled() }
+            if (!enabled) return@launch
+            while (isActive) {
+                delay(LIVE_SORT_TICK_MS)
+                if (!liveSortDue()) continue
+                withContext(ioDispatcher) {
+                    runLiveSort(groupId)
+                }
+            }
+        }
+    }
+
+    private fun stopLiveSortWatcher() {
+        liveSortJob?.cancel()
+        liveSortJob = null
+        liveSortHasNewResult = false
+    }
+
+    /**
+     * Decides whether the list may be re-sorted right now.
+     *
+     * A sort needs a new valid result, must not run while the user scrolls the list and
+     * must not run more often than every [LIVE_SORT_MIN_INTERVAL_MS].
+     */
+    private fun liveSortDue(): Boolean {
+        if (!liveSortHasNewResult) return false
+        if (listScrolling) return false
+        val now = SystemClock.elapsedRealtime()
+        if (now - liveSortLastAtMs < LIVE_SORT_MIN_INTERVAL_MS) return false
+        liveSortLastAtMs = now
+        liveSortHasNewResult = false
+        return true
+    }
+
+    private suspend fun runLiveSort(groupId: String) {
+        try {
+            sortByTestResultsInternal(groupId)
+            applyServerOrder(groupId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            LogUtil.e(AppConfig.TAG, "Live sort by test results failed", e)
+        }
+    }
+
+    /**
+     * Applies the new order of the group to the list.
+     *
+     * The rows keep their instances, only their position changes, so a re-sort does not
+     * rebuild the whole row model.
+     */
+    private suspend fun applyServerOrder(groupId: String) {
+        val order = dataSource.getServerGuidList(groupId)
+        val rank = HashMap<String, Int>(order.size)
+        order.forEachIndexed { index, guid -> rank[guid] = index }
+        cacheMutex.withLock {
+            val cached = groupDataCache[groupId]
+            if (cached != null) {
+                groupDataCache[groupId] = cached.sortedBy { rank[it.guid] ?: Int.MAX_VALUE }
+            }
+        }
+        mutableServerGroupState(groupId).update { current ->
+            current.copy(
+                servers = current.servers.sortedBy { rank[it.guid] ?: Int.MAX_VALUE },
+                rows = current.rows.sortedBy { rank[it.guid] ?: Int.MAX_VALUE },
+            )
+        }
+    }
+
+    /**
+     * Remembers whether the user is touching or scrolling the server list.
+     */
+    private fun setListScrolling(active: Boolean) {
+        listScrolling = active
+    }
+
+    /**
+     * Returns the profile of a server of a group, or null when it is not in the group.
+     */
+    internal fun profileInGroup(groupId: String, guid: String): ProfileItem? =
+        mutableServerGroupState(groupId).value.servers.firstOrNull { it.guid == guid }?.profile
+
     // ---------- Testing ----------
     fun cancelAllPing() {
         bulkTestJob?.cancel()
@@ -822,6 +945,7 @@ class MainViewModel(
         testRequests.cancelBulk()
         testRequests.invalidateCurrent()
         cancelPendingTestResults()
+        stopLiveSortWatcher()
         resetTestStatus()
         dataSource.cancelAllPing()
     }
@@ -863,6 +987,7 @@ class MainViewModel(
             serverGuids = if (keywordFilter.isNotEmpty()) serverGuids else emptyList(),
             onlyTcp = onlyTcp
         )
+        startLiveSortWatcher(groupId)
         _uiState.update {
             it.copy(
                 isTesting = true,
@@ -890,6 +1015,7 @@ class MainViewModel(
         testResultFlushJob?.cancel()
         testResultFlushJob = null
         pendingTestResults.clear()
+        pendingTestProgress = null
     }
 
     fun testCurrentServerRealPing() {
@@ -901,6 +1027,7 @@ class MainViewModel(
 
     private fun onTestsFinished(requestId: String) {
         if (testRequests.completeBulk(requestId) == null) return
+        stopLiveSortWatcher()
         resetTestStatus()
         viewModelScope.launch(ioDispatcher) {
             cacheMutex.withLock { groupDataCache.clear() }
@@ -966,5 +1093,7 @@ class MainViewModel(
 
     private companion object {
         const val TEST_RESULT_FLUSH_INTERVAL_MS = 500L
+        const val LIVE_SORT_TICK_MS = 500L
+        const val LIVE_SORT_MIN_INTERVAL_MS = 1_500L
     }
 }

@@ -36,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -94,19 +95,27 @@ fun GroupPagerPage(
     }
     val groupState by groupStateFlow.collectAsStateWithLifecycle()
     val canReorder = groupId.isNotEmpty() && searchQuery.isEmpty()
-    val actions = remember(
-        onSelectServer,
-        onEditServer,
-        onShareServer,
-        onMoreServer,
-        onRemoveServer,
-    ) {
+    // The callbacks are new lambda instances on every parent recomposition, so they
+    // are read through rememberUpdatedState. The action object itself keeps the same
+    // instance, which lets the row composables be skipped while a test updates the list.
+    val currentSelectServer by rememberUpdatedState(onSelectServer)
+    val currentEditServer by rememberUpdatedState(onEditServer)
+    val currentShareServer by rememberUpdatedState(onShareServer)
+    val currentMoreServer by rememberUpdatedState(onMoreServer)
+    val currentRemoveServer by rememberUpdatedState(onRemoveServer)
+    val actions = remember(groupId) {
         ServerRowActions(
-            select = onSelectServer,
-            edit = onEditServer,
-            share = onShareServer,
-            more = onMoreServer,
-            remove = onRemoveServer,
+            select = { guid -> currentSelectServer(guid) },
+            edit = { guid ->
+                mainViewModel.profileInGroup(groupId, guid)?.let { currentEditServer(guid, it) }
+            },
+            share = { guid ->
+                mainViewModel.profileInGroup(groupId, guid)?.let { currentShareServer(guid, it) }
+            },
+            more = { guid ->
+                mainViewModel.profileInGroup(groupId, guid)?.let { currentMoreServer(guid, it) }
+            },
+            remove = { guid, name -> currentRemoveServer(guid, name) },
         )
     }
     // The box floats over the list (the list scrolls underneath it), so the list is padded by the box height.
@@ -139,6 +148,9 @@ fun GroupPagerPage(
             onMoveServer = { fromIndex, toIndex ->
                 mainViewModel.moveServer(groupId, fromIndex, toIndex)
             },
+            onScrollStateChanged = { active ->
+                mainViewModel.onAction(MainAction.SetListScrolling(active))
+            },
             contentPadding = listPadding
         )
         if (usageInfo != null) {
@@ -157,9 +169,9 @@ fun GroupPagerPage(
 
 private class ServerRowActions(
     val select: (String) -> Unit,
-    val edit: (String, ProfileItem) -> Unit,
-    val share: (String, ProfileItem) -> Unit,
-    val more: (String, ProfileItem) -> Unit,
+    val edit: (String) -> Unit,
+    val share: (String) -> Unit,
+    val more: (String) -> Unit,
     val remove: (String, String) -> Unit,
 )
 
@@ -176,6 +188,7 @@ private fun ServerListPage(
     actions: ServerRowActions,
     onLocateHandled: () -> Unit,
     onMoveServer: (Int, Int) -> Unit,
+    onScrollStateChanged: (Boolean) -> Unit,
     contentPadding: PaddingValues
 ) {
     if (doubleColumnDisplay) {
@@ -187,6 +200,8 @@ private fun ServerListPage(
                 onMoveServer(from.index, to.index)
             }
         } else null
+
+        ReportScrollState(gridState.isScrollInProgress, onScrollStateChanged)
 
         LocateTargetEffect(locateTarget, rows, gridState, onLocateHandled)
 
@@ -231,6 +246,8 @@ private fun ServerListPage(
                 onMoveServer(from.index, to.index)
             }
         } else null
+
+        ReportScrollState(listState.isScrollInProgress, onScrollStateChanged)
 
         LocateTargetEffect(locateTarget, rows, listState, onLocateHandled)
 
@@ -285,6 +302,23 @@ private fun LocateTargetEffect(
         if (index < 0) return@LaunchedEffect
         state.scrollToItem(index, -state.layoutInfo.viewportSize.height / 3)
         onHandled()
+    }
+}
+
+/**
+ * Reports whether the user is touching or scrolling the list.
+ *
+ * The live sort waits until the scroll stops, so the list must not be reordered while
+ * the user is reading it.
+ */
+@Composable
+private fun ReportScrollState(
+    scrollInProgress: Boolean,
+    onScrollStateChanged: (Boolean) -> Unit,
+) {
+    val currentOnScrollStateChanged by rememberUpdatedState(onScrollStateChanged)
+    LaunchedEffect(scrollInProgress) {
+        currentOnScrollStateChanged(scrollInProgress)
     }
 }
 
@@ -391,7 +425,7 @@ private fun ServerListItem(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(row.remarks, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Paragraph), maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (doubleColumnDisplay) {
-                    IconButton(onClick = { actions.more(row.guid, row.profile) }, Modifier.size(36.dp)) {
+                    IconButton(onClick = { actions.more(row.guid) }, Modifier.size(36.dp)) {
                         Icon(
                             painterResource(R.drawable.ic_more_vert_24dp),
                             stringResource(R.string.acc_more),
@@ -399,14 +433,14 @@ private fun ServerListItem(
                         )
                     }
                 } else {
-                    IconButton(onClick = { actions.share(row.guid, row.profile) }, Modifier.size(36.dp)) {
+                    IconButton(onClick = { actions.share(row.guid) }, Modifier.size(36.dp)) {
                         Icon(
                             painterResource(R.drawable.ic_share_24dp),
                             stringResource(R.string.title_configuration_share),
                             Modifier.size(24.dp)
                         )
                     }
-                    IconButton(onClick = { actions.edit(row.guid, row.profile) }, Modifier.size(36.dp)) {
+                    IconButton(onClick = { actions.edit(row.guid) }, Modifier.size(36.dp)) {
                         Icon(
                             painterResource(R.drawable.ic_edit_24dp),
                             stringResource(R.string.acc_edit),

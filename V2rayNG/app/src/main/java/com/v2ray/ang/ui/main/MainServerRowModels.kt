@@ -6,9 +6,16 @@ import com.v2ray.ang.extension.isComplexType
 import com.v2ray.ang.extension.nullIfBlank
 import com.v2ray.ang.handler.AngConfigManager
 
+/**
+ * One row of the server list.
+ *
+ * Every property is an immutable value of a stable type, so the Compose compiler can
+ * skip a row whose data did not change. The profile is deliberately not part of the
+ * model: [ProfileItem] is a mutable data class, which would make the whole row model
+ * unstable and force every visible row to recompose on each list update.
+ */
 internal data class ServerRowUiModel(
     val guid: String,
-    val profile: ProfileItem,
     val remarks: String,
     val statistics: String,
     val typeDescription: String,
@@ -28,7 +35,6 @@ internal fun buildServerRowUiModel(
     val profile = server.profile
     return ServerRowUiModel(
         guid = server.guid,
-        profile = profile,
         remarks = profile.remarks,
         statistics = profile.description.nullIfBlank()
             ?: AngConfigManager.generateDescription(profile),

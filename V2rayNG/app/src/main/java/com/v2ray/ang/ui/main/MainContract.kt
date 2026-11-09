@@ -61,6 +61,7 @@ sealed interface MainAction {
     data class RemoveServer(val guid: String) : MainAction
     data class EditServer(val guid: String, val profile: com.v2ray.ang.dto.entities.ProfileItem) : MainAction
     data class Search(val query: String) : MainAction
+    data class SetListScrolling(val active: Boolean) : MainAction
     data class ShareQRCode(val guid: String) : MainAction
     data class ShareClipboard(val guid: String) : MainAction
     data class ShareFullContent(val guid: String) : MainAction
