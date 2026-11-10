@@ -417,10 +417,42 @@ Implemented (uncommitted until the end of the stage):
 * Note: `g4` was already the fastest of the unchecked configs, but it was hidden behind
   the three broken ones; the YT sort moves the working config to the top.
 
+### Stage C1 — Part 1 status (constants, pipeline API, concurrency override)
+
+* [x] **Constants in one place**: `core/ServiceCheckTuning.kt`
+  (`REAL_DELAY_CONCURRENCY_PIPELINE = 12`, `YT_CONCURRENCY_PIPELINE = 4`,
+  `YT_CONCURRENCY_STANDALONE = 6`, `MAX_TEMP_CORES_ALIVE = 16`,
+  `SERVICE_CHECK_EVENT_BUFFER = 256`), marked “starting guesses, tune after testing”.
+  The old `SERVICE_CHECK_CONCURRENCY = 3` is gone, the menu run uses 6 workers now.
+  An `init` guard fails fast when 12 + 4 > 16.
+* [x] **Pipeline API** in `ServiceCheckManager`:
+  * `newRunId()`, `beginPipeline(runId)`, `enqueue(guid, delayMillis)`, `endInput()`,
+    `cancel()` (plus the existing `start(guids)` and `cancelAndJoin()`).
+  * The queue is a `PriorityQueue` under one lock: the **lowest delay first**, the
+    order of the configs with the same delay stays stable.
+  * Duplicates are ignored (`seenGuids`, a config is checked once per run).
+  * The state has `inputClosed`; `total` grows while a pipeline adds configs.
+  * The run ends when the input is closed, the queue is empty and every worker is idle.
+  * A worker of an old run can no longer change the state of the current run
+    (`runId != currentRunId`).
+* [x] **Per-run concurrency override** (investigation result: it is possible without
+  changing the user setting):
+  * `TestServiceMessage` got `concurrency: Int = 0` (0 = use the user setting) and a
+    fixed `serialVersionUID`.
+  * `RealPingWorkerService` got `concurrency: Int = 0` and the pure helper
+    `resolveRealPingConcurrency(override, userConcurrency, onlyTcp)`.
+  * `CoreTestService.handleMeasureStart` passes `message.concurrency` to the worker.
+  * `MainViewModel.testAllRealPing(onlyTcp, concurrency)` can send the override.
+  * The user setting is never written; a normal test still uses it.
+* [ ] **Not in Part 1** (Part 2): the “YT” button, the pipeline start from the button,
+  the enqueue of every real-delay result, the first-OK auto connect, the status text
+  and the clearing of the old reports.
+
 ## In progress
 
-NEXT STEP: Stage F is committed (`3b1e4102`) and reported — wait for the user's "continue"
-before starting Stage C1 (the “YT” FAB, the pipeline API and the auto-connect).
+NEXT STEP: Part 1 is committed — wait for the user's go, then implement Part 2 (the “YT”
+button, the pipeline start, the first-OK auto connect with the user override rule, the
+status text and the clearing of the old reports).
 
 ---
 
