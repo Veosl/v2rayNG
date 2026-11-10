@@ -291,6 +291,139 @@ Still open:
 
 ---
 
+## Stage F and C1 spec
+
+### Stage F — F1: results during the run
+
+* Root cause (traced): `ServiceCheckRunner.check` returns the report →
+  `ServiceCheckManager.checkOne` writes it to MMKV and updates the counters → the report
+  cache in `MainViewModel` was only loaded in `setupGroupTab` and at the end of the run →
+  `observeServiceCheckState` returned early while `state.isRunning` → the chips only
+  appeared after the run.
+* Fix: `ServiceCheckManager` emits one `ServiceCheckEvent` per finished config
+  (`guid`, `report`, `isYtOk`, `runId`) on a `MutableSharedFlow` with a buffer of 256
+  and `DROP_OLDEST`. The event is emitted **after** the report is written to MMKV.
+* `MainViewModel` puts the report straight into `serviceCheckReports` (no MMKV read),
+  queues it in `pendingServiceCheckReports` and flushes at most every 400 ms
+  (`SERVICE_CHECK_FLUSH_INTERVAL_MS`), updating only the affected rows
+  (`applyServiceCheckReportsToRows`).
+* Status text reuses the existing progress mechanism (`MainStatus.TestProgress`):
+  `"YT 12/87 · 2 OK"`, joined with the delay text when both tests run.
+
+### Stage F — F2: YouTube-aware sort
+
+* `core/YtSortRank.kt`: pure Kotlin object, no Android imports.
+  Rank 0 = YT OK (`ServiceCheckRunner.isYtOk`), 1 = delay > 0 and not checked yet,
+  2 = checked but unknown/error, 3 = captcha `IPBLOCK`, 4 = premium `NO`,
+  5 = no delay / failed. Inside a rank: delay ascending (delay <= 0 → `Long.MAX_VALUE`),
+  then the current order (stable).
+* `AngConfigManager.sortByYoutubeResultsForSub(subId)` sits next to
+  `sortByTestResultsForSub` and copies its persistence pattern
+  (`decodeServerList` → sort → `encodeServerList`). **The existing sort function and
+  its callers are not modified.**
+* Used in three places: (a) the live-sort watcher while a YT run is active (triggered by
+  a new YT report or a new delay > 0, keeping the 1.5 s minimum, the deferral while
+  scrolling, "Sort while testing OFF = no live reorder" and the off-main-thread sort),
+  (b) one final YT sort when a YT run ends, only when "Auto sort after testing" is ON
+  (a cancelled run does not sort), (c) the new more-menu entry "Sort by YouTube results"
+  (every `when` over `MainMoreMenuAction` updated).
+* The group with the empty id ("all servers") sorts every subscription on its own, like
+  the existing `sortByTestResultsInternal`.
+
+### Stage C1 — “YT” button and pipeline (after the user's “continue”)
+
+* Constants in one place, commented “starting guesses, tune after testing”:
+  `REAL_DELAY_CONCURRENCY_PIPELINE = 12`, `YT_CONCURRENCY_PIPELINE = 4`,
+  `YT_CONCURRENCY_STANDALONE = 6` (the menu run replaces the old 3).
+  Temporary cores alive at once <= 16.
+* The real-delay run lives in `:tasks`, the service checks live in the UI process, so
+  both can run at once. Find how `RealPingWorkerService` reads
+  `getRealPingConcurrency()` and how the start message reaches `CoreTestService`. A
+  per-run override is only used when it does not change the user's setting or the
+  default for normal tests; otherwise the least invasive option is proposed. The user's
+  setting is never changed.
+* `ServiceCheckManager` pipeline API: `beginPipeline(runId)`, `enqueue(guid, delayMillis)`,
+  `endInput()`, `cancel()`. The state has `running`, `done`, `total` (grows while configs
+  are enqueued), `goodCount`, `inputClosed`. The queue is thread-safe, takes the **lowest
+  delay first** and ignores duplicates. The run ends when the input is closed, the queue
+  is empty and all workers are idle. Cancelling stops both parts (the existing real-delay
+  cancel path plus `ServiceCheckManager.cancel()`) and never disconnects the VPN.
+* A config is enqueued as soon as its real-delay result with delay > 0 arrives, inside
+  `handleServiceEvent`, without waiting for the 500 ms flush.
+* At the start of a YT button run the old service-check reports of the current group are
+  cleared. The standalone menu run does **not** clear.
+* A small FAB with the text “YT” directly left of the connect FAB, vertically aligned,
+  not overlapping the last list item. The connect FAB keeps its behaviour and colours.
+  Tap starts a run on all configs of the current group; while running it shows a
+  progress indicator and a second tap cancels.
+* Status text: “Delay 120/300 · YT 8/40 · 2 OK”.
+* The **first** event of the run (`runId` matches) with `isYtOk`: select that config and
+  connect through the existing connect/select path (VPN permission flow included), with
+  the Toast “Connected: `<remark>`”. Later OK results do **not** switch the connection;
+  testing and marking continue.
+* User override: remember the guid the auto logic selected. Before any auto connect, if
+  the selected server differs from it or the user disconnected, stop all auto switching
+  for the rest of the run.
+* One run at a time (starting any run cancels the previous one). The screen stays on
+  while a run is active. UI updates stay batched (400 ms). The Stage F live sort applies
+  to this run too.
+
+### Stage F — status
+
+Implemented (uncommitted until the end of the stage):
+
+* [x] F1-1 `ServiceCheckManager` emits one `ServiceCheckEvent` per finished config on a
+  `MutableSharedFlow` (replay 0, buffer 256, `DROP_OLDEST`), carrying `runId`, `guid`,
+  `report`, `isYtOk`; the event is emitted **after** the report is written to MMKV.
+* [x] F1-2 `MainViewModel.observeServiceCheckEvents` puts the report straight into the
+  in-memory cache `serviceCheckReports` (no MMKV read) and into `pendingServiceCheckReports`.
+* [x] F1-3 `flushPendingServiceCheckReports` runs at most every 400 ms
+  (`SERVICE_CHECK_FLUSH_INTERVAL_MS`) and replaces only the rows of the changed configs
+  (`applyServiceCheckReportsToRows`).
+* [x] F1-4 the status line reuses the existing progress mechanism
+  (`MainStatus.TestProgress`): `service_check_progress_youtube` = "YT %1$d/%2$d · %3$d OK",
+  joined with the delay text by `service_check_progress_separator`.
+* [x] F2-1 `core/YtSortRank.kt`: pure Kotlin, ranks 0..5 as specified, delay ascending
+  inside a rank, stable order.
+* [x] F2-2 `AngConfigManager.sortByYoutubeResultsForSub` next to `sortByTestResultsForSub`;
+  the existing function and its callers are **not** changed.
+* [x] F2-3a the live-sort watcher uses the YT ranking while a YT run is active
+  (triggered by a new YT report or a new delay > 0, 1.5 s minimum, deferred while
+  scrolling, "Sort while testing OFF = no live reorder", sorted on the IO dispatcher).
+* [x] F2-3b one final YT sort when the run ends normally (`done == total`) and
+  "Auto sort after testing" is ON; a cancelled run does not sort.
+* [x] F2-3c the more-menu entry "Sort by YouTube results"
+  (`MainMoreMenuAction.SortByYoutubeResults` → `MainAction.SortByYoutubeResults` →
+  `sortByYoutubeResultsAsync`); the only `when` over `MainMoreMenuAction`
+  (`MainScreen.kt:179`) is exhaustive.
+* [x] The group with the empty id ("all servers") sorts every subscription on its own,
+  like the existing `sortByTestResultsInternal`.
+
+**Ranking example on 6 made-up configs** (before = the current list order):
+
+| # | guid | real delay | service check report | rank |
+|---|---|---|---|---|
+| A | `g1` | 120 ms | YT OK (premium YES, no captcha) | 0 |
+| B | `g2` | 80 ms | premium `NO` | 4 |
+| C | `g3` | 200 ms | Google captcha `IPBLOCK` | 3 |
+| D | `g4` | 50 ms | not checked yet | 1 |
+| E | `g5` | no delay (test failed) | checked, unknown/error | 2 |
+| F | `g6` | 300 ms | not checked yet | 1 |
+
+* **Before** (current order): `g1, g2, g3, g4, g5, g6`
+* **After** (YT-aware sort): `g1` (rank 0) → `g4, g6` (rank 1, delay 50 ms then 300 ms)
+  → `g5` (rank 2) → `g3` (rank 3) → `g2` (rank 4)
+* **After**: `g1, g4, g6, g5, g3, g2`
+* Note: `g4` was already the fastest of the unchecked configs, but it was hidden behind
+  the three broken ones; the YT sort moves the working config to the top.
+
+## In progress
+
+NEXT STEP: Stage F is committed (`3b1e4102`) and reported — wait for the user's "continue"
+before starting Stage C1 (the “YT” FAB, the pipeline API and the auto-connect).
+
+---
+
 ## Check catalogue (fixed scope)
 
 Verified against `reference/ipregion.sh` (4108 lines) — the script is the source of truth.
