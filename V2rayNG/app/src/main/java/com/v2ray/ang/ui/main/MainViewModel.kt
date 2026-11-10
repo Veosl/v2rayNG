@@ -7,8 +7,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
+import com.v2ray.ang.core.ServiceCheckEvent
 import com.v2ray.ang.core.ServiceCheckManager
 import com.v2ray.ang.core.ServiceCheckRunState
+import com.v2ray.ang.core.ServiceCheckTuning
 import com.v2ray.ang.dto.ConnectionTestResult
 import com.v2ray.ang.dto.GroupMapItem
 import com.v2ray.ang.dto.LocateTarget
@@ -24,6 +26,7 @@ import com.v2ray.ang.extension.matchesPattern
 import com.v2ray.ang.extension.moveItem
 import com.v2ray.ang.handler.SubscriptionInfoParser
 import com.v2ray.ang.ui.base.BaseViewModel
+import com.v2ray.ang.ui.base.ViewModelEvent
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import kotlinx.coroutines.CancellationException
@@ -91,6 +94,21 @@ class MainViewModel(
     private val dataSource: MainDataSource
 ) : BaseViewModel(application) {
 
+    /**
+     * The one-shot events of the main screen.
+     *
+     * The Activity owns the connect path, the ViewModel asks for it with an event.
+     */
+    sealed interface MainViewModelEvent : ViewModelEvent {
+        /**
+         * The run found a config that works for YouTube, the Activity connects it.
+         *
+         * @param guid The GUID of the profile.
+         * @param remark The name of the profile, it is shown in the toast.
+         */
+        data class ConnectServer(val guid: String, val remark: String) : MainViewModelEvent
+    }
+
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
     private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default
     private val preloadDispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
@@ -157,6 +175,30 @@ class MainViewModel(
     // Null means that no run was seen, an empty id is the group with every server.
     private var ytRunGroupId: String? = null
 
+    // The id of the running pipeline run of the "YT" button. Zero means that no run of
+    // the button is active.
+    private var ytPipelineRunId: Long = 0L
+
+    // The id of the real delay request of the pipeline run. Only the results of this
+    // request are added to the run.
+    private var ytPipelineRequestId: String = ""
+
+    // The GUIDs of the configs of the running run. The group is captured at the start
+    // of the run, a tab change during the run does not change the run.
+    private var ytRunGuids: Set<String> = emptySet()
+
+    // Whether the user selected a config or connected or disconnected during the run.
+    // The automatic connection stops for the rest of the run.
+    private var ytUserInteracted = false
+
+    // Whether the automatic connection already happened. It happens once per run.
+    private var ytAutoConnectDone = false
+
+    // The selected config and the connection state at the start of the run. They show
+    // whether the automatic connection would change something.
+    private var ytStartSelectedGuid: String? = null
+    private var ytStartConnected = false
+
     // The progress texts of the running tests. They are shown together in one status
     // line, the delay test and the service check can run at the same time.
     private var lastDelayProgress: String? = null
@@ -211,6 +253,9 @@ class MainViewModel(
             is MainServiceEvent.MeasureConfigSuccess -> {
                 val request = testRequests.bulk?.takeIf { it.id == event.requestId } ?: return
                 queueTestResult(event.result, request)
+                // The config is checked as soon as its delay arrives, the check does
+                // not wait for the flush of the delay results.
+                enqueuePipelineCheck(event.result, event.requestId)
             }
 
             is MainServiceEvent.MeasureConfigNotify -> {
@@ -292,9 +337,30 @@ class MainViewModel(
             }
         }
         if (progress != null && testRequests.bulk?.id == request.id) {
-            lastDelayProgress = progress
+            lastDelayProgress = dataSource.getString(
+                R.string.service_check_progress_delay,
+                formatDelayProgress(progress)
+            )
             publishProgressText()
         }
+    }
+
+    /**
+     * Formats the progress of the real delay test as "120/300".
+     *
+     * The service sends the two numbers with spaces around the slash, the status line
+     * shows them without spaces.
+     *
+     * @param progress The progress text of the service.
+     * @return The progress text without the spaces around the slash.
+     */
+    private fun formatDelayProgress(progress: String): String {
+        val parts = progress.split('/')
+        if (parts.size != 2) return progress
+        val left = parts[0].trim()
+        val right = parts[1].trim()
+        if (left.isEmpty() || right.isEmpty()) return progress
+        return "$left/$right"
     }
 
     /**
@@ -368,9 +434,22 @@ class MainViewModel(
         when (action) {
             MainAction.Initialize -> initialize()
             MainAction.RefreshGroups -> setupGroupTab(forceRefresh = true)
-            MainAction.TestAllServers -> testAllRealPing(true)
-            MainAction.TestRealAllServers -> testAllRealPing()
-            MainAction.CancelTesting -> cancelAllPing()
+            MainAction.TestAllServers -> {
+                // Only one run at a time, a run of the "YT" button is stopped first.
+                cancelServiceCheckRun()
+                testAllRealPing(true)
+            }
+
+            MainAction.TestRealAllServers -> {
+                cancelServiceCheckRun()
+                testAllRealPing()
+            }
+            MainAction.CancelTesting -> {
+                cancelAllPing()
+                // A run of the "YT" button waits for the results of the real delay
+                // test, it cannot stay open when the test is stopped.
+                cancelServiceCheckRun()
+            }
             MainAction.RemoveAllServers -> removeAllServerAsync()
             MainAction.RemoveDuplicateServers -> removeDuplicateServerAsync()
             MainAction.RemoveInvalidServers -> removeInvalidServerAsync()
@@ -378,6 +457,7 @@ class MainViewModel(
             MainAction.SortByYoutubeResults -> sortByYoutubeResultsAsync()
             MainAction.ClearServiceCheckResults -> clearServiceCheckResults()
             MainAction.CheckYouTubeOnTestedConfigs -> toggleYouTubeCheck()
+            MainAction.ToggleYouTubeRun -> toggleYtRun()
             is MainAction.ShowServiceCheckDetails -> showServiceCheckDetails(action.guid)
             MainAction.DismissServiceCheckDetails -> dismissServiceCheckDetails()
             is MainAction.CopyServiceCheckBody -> copyServiceCheckBody(action.checkId)
@@ -918,6 +998,8 @@ class MainViewModel(
      */
     private fun toggleYouTubeCheck() {
         if (ServiceCheckManager.state.value.isRunning) {
+            // A run of the "YT" button is stopped first, so its button is reset.
+            cancelServiceCheckRun(showToast = false)
             ServiceCheckManager.cancel()
             toast(R.string.toast_service_check_cancelled)
             return
@@ -947,6 +1029,168 @@ class MainViewModel(
         val groupId = uiState.value.selectedGroupId
         return dataSource.getServerGuidList(groupId).filter { guid ->
             (dataSource.decodeAffiliationInfo(guid)?.testDelayMillis ?: 0L) > 0L
+        }
+    }
+
+    // ---------- Pipeline run of the "YT" button ----------
+    /**
+     * Starts the run of the "YT" button, or stops the running run.
+     *
+     * The run measures the real delay of every config of the current group and checks
+     * every config with a delay as soon as its delay arrives. The first config that
+     * works for YouTube is connected.
+     */
+    private fun toggleYtRun() {
+        if (ytPipelineRunId != 0L) {
+            cancelYtRun()
+            return
+        }
+        startYtRun()
+    }
+
+    /**
+     * Starts the run of the "YT" button.
+     *
+     * The order of the start is fixed: the previous run is stopped, the old reports of
+     * the group are removed, the pipeline is opened and the real delay test starts.
+     * The real delay test and the service checks run at the same time, the checks use
+     * the results of the test.
+     */
+    private fun startYtRun() {
+        viewModelScope.launch {
+            val groupId = uiState.value.selectedGroupId
+            val guids = withContext(ioDispatcher) { dataSource.getServerGuidList(groupId) }
+            if (guids.isEmpty()) {
+                toastError(dataSource.getString(R.string.toast_service_check_no_configs))
+                return@launch
+            }
+            // A run that is still active is stopped first, only one run checks at a time.
+            cancelServiceCheckRun(showToast = false)
+            // The workers are awaited, so no report of the previous run can be written
+            // after the reports of the group were removed.
+            ServiceCheckManager.cancelAndJoin()
+            // The old reports of the group are removed, the list shows the new results only.
+            withContext(ioDispatcher) {
+                dataSource.removeServiceCheckReports(guids)
+                refreshServiceCheckRows(groupId)
+            }
+            // The run remembers what was selected and whether the service was running,
+            // so the automatic connection can tell its own change from a change of the
+            // user.
+            ytStartSelectedGuid = uiState.value.selectedGuid
+            ytStartConnected = uiState.value.isRunning
+            ytUserInteracted = false
+            ytAutoConnectDone = false
+            ytRunGuids = guids.toHashSet()
+            ytRunGroupId = groupId
+            val runId = ServiceCheckManager.newRunId()
+            ytPipelineRunId = runId
+            _uiState.update { it.copy(isYtRunActive = true) }
+            ServiceCheckManager.beginPipeline(runId)
+            // The real delay test starts with the limit of the pipeline, the user
+            // setting is never changed.
+            val requestId = testAllRealPing(
+                concurrency = ServiceCheckTuning.REAL_DELAY_CONCURRENCY_PIPELINE
+            )
+            if (requestId.isEmpty()) {
+                // There is nothing to measure, the run cannot take any config.
+                cancelServiceCheckRun(showToast = false)
+                return@launch
+            }
+            ytPipelineRequestId = requestId
+            // The list is sorted by the YouTube result while the run is active.
+            ytRunActive = true
+        }
+    }
+
+    /**
+     * Stops the service checks of the running pipeline run.
+     *
+     * The real delay test and the VPN are not touched.
+     *
+     * @param showToast Whether the cancel is shown to the user.
+     */
+    private fun cancelServiceCheckRun(showToast: Boolean = true) {
+        if (ytPipelineRunId == 0L) return
+        ytPipelineRunId = 0L
+        ytPipelineRequestId = ""
+        ytRunGuids = emptySet()
+        ytAutoConnectDone = true
+        _uiState.update { it.copy(isYtRunActive = false) }
+        ServiceCheckManager.cancel()
+        if (showToast) {
+            toast(R.string.toast_service_check_cancelled)
+        }
+    }
+
+    /**
+     * Stops the running pipeline run: the service checks and the real delay test of
+     * the run. The VPN stays connected.
+     */
+    private fun cancelYtRun() {
+        if (ytPipelineRunId == 0L) return
+        cancelAllPing()
+        cancelServiceCheckRun()
+    }
+
+    /**
+     * Remembers that the user took over during a run of the "YT" button.
+     *
+     * The automatic connection stops for the rest of the run, the check keeps running.
+     */
+    fun onUserInteraction() {
+        if (ytPipelineRunId == 0L) return
+        ytUserInteracted = true
+    }
+
+    /**
+     * Adds a config to the running pipeline run.
+     *
+     * The config is checked as soon as its real delay arrives, the check does not wait
+     * for the flush of the delay results. Only the configs of the group of the run are
+     * checked, and only the results of the real delay test of the run are used.
+     *
+     * @param result The result of the real delay test.
+     * @param requestId The id of the real delay request of the result.
+     */
+    private fun enqueuePipelineCheck(result: RealPingResult, requestId: String) {
+        if (ytPipelineRunId == 0L || requestId != ytPipelineRequestId) return
+        if (result.delayMillis <= 0L) return
+        if (result.guid !in ytRunGuids) return
+        ServiceCheckManager.enqueue(result.guid, result.delayMillis)
+    }
+
+    /**
+     * Connects the first config of the run that works for YouTube.
+     *
+     * The connection happens once per run. The user can take over: when the user
+     * selects a config or connects or disconnects during the run, the automatic
+     * connection stops for the rest of the run. The check itself keeps running.
+     *
+     * @param event The finished service check.
+     */
+    private suspend fun maybeAutoConnect(event: ServiceCheckEvent) {
+        if (!event.isYtOk) return
+        val runId = ytPipelineRunId
+        if (runId == 0L || event.runId != runId) return
+        if (ytAutoConnectDone || ytUserInteracted) return
+        // The selection was changed by something else than the automatic connection.
+        if (uiState.value.selectedGuid != ytStartSelectedGuid) {
+            ytUserInteracted = true
+            return
+        }
+        ytAutoConnectDone = true
+        val remark = withContext(ioDispatcher) {
+            dataSource.decodeServerConfig(event.guid)?.remarks.orEmpty()
+        }
+        // The config is already the selected one and the service is running: the VPN
+        // is not restarted.
+        if (event.guid == ytStartSelectedGuid && ytStartConnected && uiState.value.isRunning) {
+            toast(dataSource.getString(R.string.toast_service_check_connected, remark))
+            return
+        }
+        viewModelScope.launch {
+            _viewModelEvent.send(MainViewModelEvent.ConnectServer(event.guid, remark))
         }
     }
 
@@ -981,6 +1225,13 @@ class MainViewModel(
                 }
                 if (!serviceCheckRunStarted) return@collect
                 serviceCheckRunStarted = false
+                // The button of the "YT" button is reset when its run is over.
+                if (state.runId == ytPipelineRunId) {
+                    ytPipelineRunId = 0L
+                    ytPipelineRequestId = ""
+                    ytRunGuids = emptySet()
+                    _uiState.update { it.copy(isYtRunActive = false) }
+                }
                 // The rows show the reports of the run, also when the run was stopped
                 // before every config was checked.
                 withContext(ioDispatcher) {
@@ -1052,6 +1303,7 @@ class MainViewModel(
                 pendingServiceCheckReports[event.guid] = event.report
                 liveSortHasNewYtResult = true
                 scheduleServiceCheckFlush()
+                maybeAutoConnect(event)
             }
         }
     }
@@ -1104,13 +1356,20 @@ class MainViewModel(
     }
 
     /**
-     * Reads the service check reports again and rebuilds the rows of the current group.
+     * Reads the service check reports again and rebuilds the rows of a group.
+     *
+     * The reports are read inside the lock of the cache, so two rebuilds cannot
+     * overwrite the reports of each other with an old read.
+     *
+     * @param groupId The id of the group.
      */
-    private suspend fun refreshServiceCheckRows() {
-        loadServiceCheckReports()
-        val groupId = uiState.value.selectedGroupId
-        val servers = cacheMutex.withLock { groupDataCache[groupId] } ?: return
-        updateGroupUi(groupId, servers)
+    private suspend fun refreshServiceCheckRows(groupId: String = uiState.value.selectedGroupId) {
+        cacheMutex.withLock {
+            loadServiceCheckReports()
+            val servers = groupDataCache[groupId]
+                ?: mutableServerGroupState(groupId).value.servers
+            updateGroupUi(groupId, servers)
+        }
     }
 
     /**
@@ -1396,15 +1655,16 @@ class MainViewModel(
      *
      * @param onlyTcp Whether only the TCP delay is measured.
      * @param concurrency The number of tests that run at the same time. Zero means the
-     * user setting is used, a positive number is an override for this run only. The
-     * user setting itself is never changed.
+     * user setting is used, a positive number is the limit of this run: a lower user
+     * setting is used as it is. The user setting itself is never changed.
+     * @return The id of the request, empty when the test did not start.
      */
-    fun testAllRealPing(onlyTcp: Boolean = false, concurrency: Int = 0) {
+    fun testAllRealPing(onlyTcp: Boolean = false, concurrency: Int = 0): String {
         cancelAllPing()
         val groupId = uiState.value.selectedGroupId
         val servers = currentServers()
         if (servers.isEmpty()) {
-            return
+            return ""
         }
         val serverGuids = servers.map { it.guid }
         mutableServerGroupState(groupId).update { current ->
@@ -1451,6 +1711,7 @@ class MainViewModel(
             }
             dataSource.sendMsg2TestService(message, request.id)
         }
+        return request.id
     }
 
     private fun cancelPendingTestResults() {
@@ -1470,6 +1731,11 @@ class MainViewModel(
 
     private fun onTestsFinished(requestId: String) {
         if (testRequests.completeBulk(requestId) == null) return
+        // The pipeline run takes no more configs, it ends when every config of its
+        // queue was checked.
+        if (ytPipelineRunId != 0L) {
+            ServiceCheckManager.endInput()
+        }
         if (ytRunActive) {
             // A service check is still running, its watcher sorts the list by the
             // YouTube result.
@@ -1514,7 +1780,11 @@ class MainViewModel(
             state.copy(
                 isRunning = running,
                 isTesting = testRequests.isTesting,
-                status = if (!clearTestingText && state.isRunning == running) state.status
+                // The progress of a running test stays visible when the state of the
+                // service changes, the run of the service check restarts the VPN.
+                status = if (!clearTestingText &&
+                    (state.isRunning == running || testRequests.isTesting)
+                ) state.status
                 else if (running) MainStatus.Connected else MainStatus.Disconnected
             )
         }
@@ -1527,6 +1797,9 @@ class MainViewModel(
         reloadJob?.cancel()
         filterJob?.cancel()
         cancelAllPing()
+        // The run of the "YT" button waits for the results of the real delay test, it
+        // cannot stay open when the screen is gone.
+        cancelServiceCheckRun()
         dataSource.close()
         super.onCleared()
     }

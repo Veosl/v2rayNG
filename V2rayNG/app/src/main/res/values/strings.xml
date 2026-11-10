@@ -368,6 +368,12 @@
     <string name="acc_service_check_details">Open the service check details</string>
     <string name="service_check_chip_youtube">YT</string>
     <string name="service_check_chip_music">M</string>
+    <string name="service_check_fab_label">YT</string>
+    <string name="acc_service_check_start">Start the YouTube check</string>
+    <string name="acc_service_check_cancel">Cancel the YouTube check</string>
+    <string name="toast_service_check_connected">Connected: %1$s</string>
+    <string name="toast_service_check_no_configs">This group has no configs</string>
+    <string name="service_check_progress_delay">Delay %1$s</string>
     <string name="service_check_progress_youtube">YT %1$d/%2$d · %3$d OK</string>
     <string name="service_check_progress_separator">" · "</string>
     <string name="service_check_label_youtube_premium">YouTube Premium</string>

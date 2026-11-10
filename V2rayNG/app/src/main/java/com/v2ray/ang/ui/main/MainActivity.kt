@@ -9,7 +9,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.v2ray.ang.AngApplication
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
@@ -94,8 +96,47 @@ class MainActivity : HelperBaseComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mainViewModel.onAction(MainAction.Initialize)
+        observeViewModel()
 
         checkAndRequestPermission(PermissionType.POST_NOTIFICATIONS) {}
+    }
+
+    /**
+     * Collects the one-shot events of the ViewModel.
+     *
+     * The Activity owns the connect path, the ViewModel asks for it with an event.
+     */
+    private fun observeViewModel() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                mainViewModel.viewModelEvent.collect { event ->
+                    when (event) {
+                        is MainViewModel.MainViewModelEvent.ConnectServer -> {
+                            connectServer(event.guid, event.remark)
+                        }
+
+                        else -> {}
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Selects a config and connects it.
+     *
+     * The path is the same as the one of the more menu: the running daemon is
+     * restarted, a stopped service starts with the permission flow of the VPN.
+     *
+     * @param guid The GUID of the profile.
+     * @param remark The name of the profile, it is shown in the toast.
+     */
+    private fun connectServer(guid: String, remark: String) {
+        if (mainViewModel.uiState.value.selectedGuid != guid) {
+            mainViewModel.updateSelectedGuid(guid)
+        }
+        LauncherManager.restartServiceOrStart(this, ::requestServiceStart)
+        toast(getString(R.string.toast_service_check_connected, remark))
     }
 
     @Composable
@@ -111,7 +152,12 @@ class MainActivity : HelperBaseComponentActivity() {
                     MainAction.ImportClipboard -> importClipboard()
                     MainAction.ImportConfigLocal -> importConfigLocal()
                     is MainAction.ImportManually -> importManually(action.type)
-                    MainAction.RestartService -> LauncherManager.restartServiceOrStart(this, ::requestServiceStart)
+                    MainAction.RestartService -> {
+                        // The user takes over, the automatic connection of a running
+                        // service check stops.
+                        mainViewModel.onUserInteraction()
+                        LauncherManager.restartServiceOrStart(this, ::requestServiceStart)
+                    }
                     MainAction.LocateSelectedServer -> mainViewModel.triggerLocateSelectedServer()
                     is MainAction.SelectServer -> setSelectServer(action.guid)
                     is MainAction.EditServer -> editServer(action.guid, action.profile)
@@ -167,6 +213,9 @@ class MainActivity : HelperBaseComponentActivity() {
     }
 
     private fun handleFabAction() {
+        // The user takes over, the automatic connection of a running service check
+        // stops.
+        mainViewModel.onUserInteraction()
         if (mainViewModel.uiState.value.isRunning) {
             LauncherManager.stopService(this)
         } else {
@@ -277,6 +326,9 @@ class MainActivity : HelperBaseComponentActivity() {
     }
 
     private fun setSelectServer(guid: String) {
+        // The user takes over, the automatic connection of a running service check
+        // stops.
+        mainViewModel.onUserInteraction()
         val selected = mainViewModel.uiState.value.selectedGuid
         if (guid != selected) {
             mainViewModel.updateSelectedGuid(guid)

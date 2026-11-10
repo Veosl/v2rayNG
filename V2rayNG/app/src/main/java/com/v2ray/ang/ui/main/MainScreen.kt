@@ -1,5 +1,9 @@
 package com.v2ray.ang.ui.main
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.view.WindowManager
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,6 +18,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -25,6 +30,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -44,6 +50,7 @@ fun MainScreen(
     val groups = uiState.groups
     val isLoading by mainViewModel.isLoading.collectAsStateWithLifecycle()
     val isRunning = uiState.isRunning
+    val isYtRunActive = uiState.isYtRunActive
     val displayText = mainViewModel.formatStatus(uiState.status)
     val selectedGuid = uiState.selectedGuid
     val doubleColumnDisplay = uiState.doubleColumnDisplay
@@ -78,6 +85,9 @@ fun MainScreen(
 
     val lazyListStates = remember { mutableStateMapOf<String, LazyListState>() }
     val lazyGridStates = remember { mutableStateMapOf<String, LazyGridState>() }
+
+    // The screen stays on while a run of the "YT" button is active.
+    KeepScreenOn(isYtRunActive)
 
     LaunchedEffect(groups) {
         val validGroupIds = groups.map { it.id }.toSet()
@@ -198,6 +208,7 @@ fun MainScreen(
                 MainBottomBar(
                     displayText = displayText,
                     isRunning = isRunning,
+                    isYtRunActive = isYtRunActive,
                     isDarkTheme = isDarkTheme,
                     onAction = onAction
                 )
@@ -271,4 +282,37 @@ fun MainScreen(
             }
         }
     }
+}
+
+/**
+ * Keeps the screen on while the service check is running.
+ *
+ * @param enabled Whether the screen stays on.
+ */
+@Composable
+private fun KeepScreenOn(enabled: Boolean) {
+    val activity = LocalContext.current.findActivity()
+    DisposableEffect(enabled, activity) {
+        val window = activity?.window
+        if (enabled) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+}
+
+/**
+ * Finds the activity of a context, the context of a composition can be a wrapper.
+ */
+private fun Context.findActivity(): Activity? {
+    var current: Context? = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return null
 }

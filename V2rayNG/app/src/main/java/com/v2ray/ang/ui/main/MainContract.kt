@@ -22,6 +22,7 @@ data class MainUiState(
     val selectedGuid: String? = null,
     val isRunning: Boolean = false,
     val isTesting: Boolean = false,
+    val isYtRunActive: Boolean = false,
     val status: MainStatus = MainStatus.Disconnected,
     val locateTarget: LocateTarget? = null,
     val confirmRemove: Boolean = false,
@@ -42,6 +43,7 @@ sealed interface MainAction {
     data object TestRealAllServers : MainAction
     data object ClearServiceCheckResults : MainAction
     data object CheckYouTubeOnTestedConfigs : MainAction
+    data object ToggleYouTubeRun : MainAction
     data class ShowServiceCheckDetails(val guid: String) : MainAction
     data object DismissServiceCheckDetails : MainAction
     data class CopyServiceCheckBody(val checkId: String) : MainAction

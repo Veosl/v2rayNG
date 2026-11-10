@@ -17,9 +17,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -31,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -45,11 +48,15 @@ import kotlinx.coroutines.launch
 fun MainBottomBar(
     displayText: String,
     isRunning: Boolean,
+    isYtRunActive: Boolean,
     isDarkTheme: Boolean,
     onAction: (MainAction) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val rotationAnim = remember { Animatable(0f) }
+    val ytContentDescription = stringResource(
+        if (isYtRunActive) R.string.acc_service_check_cancel else R.string.acc_service_check_start
+    )
 
     LaunchedEffect(isRunning) {
         if (!isRunning) {
@@ -115,6 +122,40 @@ fun MainBottomBar(
                     .size(24.dp)
                     .graphicsLayer { rotationZ = rotationAnim.value }
             )
+        }
+        // The small button of the service check sits directly left of the connect
+        // button. It is centered on the same line: the button is 40 dp high, the
+        // connect button is 56 dp high, so the small button is moved 8 dp down.
+        SmallFloatingActionButton(
+            onClick = { onAction(MainAction.ToggleYouTubeRun) },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(end = 92.dp)
+                .offset(y = (-20).dp)
+                .navigationBarsPadding()
+                .semantics {
+                    contentDescription = ytContentDescription
+                },
+            containerColor = if (isYtRunActive) colorFabActive
+            else if (isDarkTheme) colorFabInactiveDark
+            else colorFabInactiveLight,
+            contentColor = Color.White,
+        ) {
+            if (isYtRunActive) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clearAndSetSemantics { },
+                    strokeWidth = 2.dp,
+                    color = Color.White,
+                )
+            } else {
+                Text(
+                    text = stringResource(R.string.service_check_fab_label),
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clearAndSetSemantics { },
+                )
+            }
         }
     }
 }

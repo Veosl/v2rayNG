@@ -41,17 +41,18 @@ internal object RealPingExecutionLimiter {
 /**
  * The number of tests of a batch that run at the same time.
  *
- * An override is used as it is, the user setting keeps its own rule: a TCP-only batch
- * uses twice the number of threads.
+ * An override is the limit of the run, the user setting keeps its own value: a lower
+ * user setting is used as it is, a higher one is limited by the override. A TCP-only
+ * batch uses twice the number of threads.
  *
- * @param override The number of the run, zero means the user setting is used.
+ * @param override The limit of the run, zero means the user setting is used as it is.
  * @param userConcurrency The number of the user setting.
  * @param onlyTcp Whether only the TCP delay is measured.
  * @return The number of threads of the batch.
  */
 private fun resolveRealPingConcurrency(override: Int, userConcurrency: Int, onlyTcp: Boolean): Int {
-    if (override > 0) return override
-    return if (onlyTcp) userConcurrency * 2 else userConcurrency
+    val limit = if (override > 0) minOf(userConcurrency, override) else userConcurrency
+    return if (onlyTcp) limit * 2 else limit
 }
 
 /**
@@ -62,8 +63,8 @@ private fun resolveRealPingConcurrency(override: Int, userConcurrency: Int, only
  * @param guids The GUIDs of the configs that are measured.
  * @param onlyTcp Whether only the TCP delay is measured.
  * @param concurrency The number of tests that run at the same time. Zero means the
- * user setting is used, a positive number is an override for this batch only. The user
- * setting itself is never changed.
+ * user setting is used, a positive number is the limit of this batch: a lower user
+ * setting is used as it is. The user setting itself is never changed.
  * @param onEvent The callback of the events of the batch.
  */
 class RealPingWorkerService(

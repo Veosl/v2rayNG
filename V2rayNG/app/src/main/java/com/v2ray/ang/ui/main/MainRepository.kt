@@ -199,6 +199,10 @@ class MainRepository(
         MmkvManager.clearServiceCheckReports()
     }
 
+    override fun removeServiceCheckReports(guids: Collection<String>) {
+        MmkvManager.removeServiceCheckReports(guids)
+    }
+
     override fun getServiceCheckReportGuids(): Set<String> =
         MmkvManager.getServiceCheckReportGuids()
 

@@ -46,6 +46,7 @@ interface MainDataSource : Closeable {
     fun sortByTestResultsForSub(subId: String)
     fun sortByYoutubeResultsForSub(subId: String)
     fun clearServiceCheckResults()
+    fun removeServiceCheckReports(guids: Collection<String>)
     fun getServiceCheckReportGuids(): Set<String>
     fun decodeServiceCheckReport(guid: String): ServiceCheckReport?
     fun getSubsList(): List<String>
