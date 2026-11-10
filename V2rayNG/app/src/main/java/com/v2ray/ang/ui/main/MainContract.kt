@@ -26,7 +26,8 @@ data class MainUiState(
     val locateTarget: LocateTarget? = null,
     val confirmRemove: Boolean = false,
     val doubleColumnDisplay: Boolean = false,
-    val shareQRCodeBitmap: android.graphics.Bitmap? = null
+    val shareQRCodeBitmap: android.graphics.Bitmap? = null,
+    val serviceCheckDetails: ServiceCheckDetailsUiModel? = null
 )
 
 /**
@@ -40,6 +41,10 @@ sealed interface MainAction {
     data object TestAllServers : MainAction
     data object TestRealAllServers : MainAction
     data object ClearServiceCheckResults : MainAction
+    data object CheckYouTubeOnTestedConfigs : MainAction
+    data class ShowServiceCheckDetails(val guid: String) : MainAction
+    data object DismissServiceCheckDetails : MainAction
+    data class CopyServiceCheckBody(val checkId: String) : MainAction
     data object CancelTesting : MainAction
     data object RemoveAllServers : MainAction
     data object RemoveDuplicateServers : MainAction

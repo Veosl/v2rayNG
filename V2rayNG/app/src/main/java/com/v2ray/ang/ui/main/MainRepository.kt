@@ -14,6 +14,7 @@ import com.v2ray.ang.dto.SubscriptionUpdateResult
 import com.v2ray.ang.dto.TestServiceMessage
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.ServerAffiliationInfo
+import com.v2ray.ang.dto.entities.ServiceCheckReport
 import com.v2ray.ang.dto.entities.SubscriptionCache
 import com.v2ray.ang.dto.entities.SubscriptionItem
 import com.v2ray.ang.extension.serializable
@@ -190,6 +191,12 @@ class MainRepository(
     override fun clearServiceCheckResults() {
         MmkvManager.clearServiceCheckReports()
     }
+
+    override fun getServiceCheckReportGuids(): Set<String> =
+        MmkvManager.getServiceCheckReportGuids()
+
+    override fun decodeServiceCheckReport(guid: String): ServiceCheckReport? =
+        MmkvManager.decodeServiceCheckReport(guid)
 
     override fun getSubsList(): List<String> = MmkvManager.decodeSubsList()
 

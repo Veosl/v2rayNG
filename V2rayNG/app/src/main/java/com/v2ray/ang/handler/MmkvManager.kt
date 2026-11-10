@@ -554,6 +554,14 @@ object MmkvManager {
     }
 
     /**
+     * Returns the GUIDs of the profiles that have a service check report.
+     *
+     * @return The GUIDs of the checked profiles, empty when nothing was checked.
+     */
+    fun getServiceCheckReportGuids(): Set<String> =
+        serviceCheckStorage.allKeys()?.toSet() ?: emptySet()
+
+    /**
      * Removes every service check report.
      */
     fun clearServiceCheckReports() {

@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -85,6 +87,7 @@ fun GroupPagerPage(
     onShareServer: (String, ProfileItem) -> Unit,
     onMoreServer: (String, ProfileItem) -> Unit,
     onRemoveServer: (String, String) -> Unit,
+    onDetailsServer: (String) -> Unit,
     usageInfo: SubscriptionUsageInfo?,
     groupTitle: String,
     onOpenLink: (String) -> Unit,
@@ -103,6 +106,7 @@ fun GroupPagerPage(
     val currentShareServer by rememberUpdatedState(onShareServer)
     val currentMoreServer by rememberUpdatedState(onMoreServer)
     val currentRemoveServer by rememberUpdatedState(onRemoveServer)
+    val currentDetailsServer by rememberUpdatedState(onDetailsServer)
     val actions = remember(groupId) {
         ServerRowActions(
             select = { guid -> currentSelectServer(guid) },
@@ -116,6 +120,7 @@ fun GroupPagerPage(
                 mainViewModel.profileInGroup(groupId, guid)?.let { currentMoreServer(guid, it) }
             },
             remove = { guid, name -> currentRemoveServer(guid, name) },
+            details = { guid -> currentDetailsServer(guid) },
         )
     }
     // The box floats over the list (the list scrolls underneath it), so the list is padded by the box height.
@@ -173,6 +178,7 @@ private class ServerRowActions(
     val share: (String) -> Unit,
     val more: (String) -> Unit,
     val remove: (String, String) -> Unit,
+    val details: (String) -> Unit,
 )
 
 @Composable
@@ -396,6 +402,8 @@ private fun ServerListItem(
                     stateDescription = selectedStateDescription
                 }
             }
+            // The row has no long press: the row is the drag handle of the reorderable
+            // list, a long press starts the drag of the row.
             .clickable { actions.select(row.guid) }
     ) {
         Box(
@@ -488,16 +496,115 @@ private fun ServerListItem(
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    testResult,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (row.testDelayMillis < 0L) colorPingRed else colorPing,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        testResult,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (row.testDelayMillis < 0L) colorPingRed else colorPing,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    ServiceCheckRowChips(row.serviceCheck) { actions.details(row.guid) }
+                }
             }
         }
     }
+}
+
+/**
+ * The service check data of a row: the country of the exit IP and the "YT" and "M"
+ * chips.
+ *
+ * The chips are appended to the delay, they stay inside the height of the line, so the
+ * height of the row does not change.
+ *
+ * A chip opens the details of the service check of the row. The row itself has no long
+ * press, because the row is the drag handle of the reorderable list.
+ *
+ * @param serviceCheck The service check data of the row.
+ * @param onDetails The details of the row were requested.
+ */
+@Composable
+private fun ServiceCheckRowChips(
+    serviceCheck: ServerServiceCheckUiModel,
+    onDetails: () -> Unit,
+) {
+    if (serviceCheck.isEmpty) return
+    val detailsLabel = stringResource(R.string.acc_service_check_details)
+    Row(
+        modifier = Modifier.padding(start = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (serviceCheck.country.isNotEmpty()) {
+            Text(
+                serviceCheck.country,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.width(4.dp))
+        }
+        val ytChip = serviceCheck.ytChip
+        if (ytChip != ServiceCheckChip.HIDDEN) {
+            ServiceCheckChipLabel(
+                label = stringResource(R.string.service_check_chip_youtube),
+                state = ytChip,
+                clickLabel = detailsLabel,
+                onClick = onDetails,
+            )
+            Spacer(Modifier.width(4.dp))
+        }
+        val musicChip = serviceCheck.musicChip
+        if (musicChip != ServiceCheckChip.HIDDEN) {
+            ServiceCheckChipLabel(
+                label = stringResource(R.string.service_check_chip_music),
+                state = musicChip,
+                clickLabel = detailsLabel,
+                onClick = onDetails,
+            )
+        }
+    }
+}
+
+/**
+ * One small chip of a server row.
+ *
+ * The colours are the semantic colours of the app, so the chip keeps its meaning in the
+ * light theme, in the dark theme and with dynamic colors.
+ *
+ * @param label The text of the chip.
+ * @param state The state of the chip.
+ * @param clickLabel The accessible name of the action of the chip.
+ * @param onClick The chip was pressed.
+ */
+@Composable
+private fun ServiceCheckChipLabel(
+    label: String,
+    state: ServiceCheckChip,
+    clickLabel: String,
+    onClick: () -> Unit,
+) {
+    val color = when (state) {
+        ServiceCheckChip.OK -> colorPing
+        ServiceCheckChip.NO -> colorPingRed
+        ServiceCheckChip.IPBLOCK -> colorConfigType
+        ServiceCheckChip.UNKNOWN -> MaterialTheme.colorScheme.outline
+        ServiceCheckChip.HIDDEN -> return
+    }
+    Text(
+        text = label,
+        fontSize = 10.sp,
+        lineHeight = 12.sp,
+        fontWeight = FontWeight.Bold,
+        color = Color.White,
+        modifier = Modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(color)
+            // The click is before the padding, so the whole chip is the touch target.
+            .clickable(onClickLabel = clickLabel) { onClick() }
+            .padding(horizontal = 4.dp, vertical = 1.dp),
+    )
 }
 
 internal suspend fun PagerState.navigateToPageOptimized(

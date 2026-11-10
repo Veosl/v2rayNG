@@ -348,19 +348,10 @@
     <string name="title_ping_all_server">TCP বিলম্ব পরীক্ষা করুন (TCPing)</string>
     <string name="title_real_ping_all_server">প্রকৃত বিলম্ব পরীক্ষা করুন</string>
     <!-- Service check -->
-    <string name="title_service_check">পরিষেবা পরীক্ষা</string>
-    <string name="service_check_action_start">শুরু করুন</string>
-    <string name="service_check_running">পরীক্ষা চলছে</string>
-    <string name="service_check_progress">%1$d/%2$d</string>
-    <string name="service_check_hint_no_tested_configs">এখনও কোনো প্রকৃত বিলম্বের ফলাফল নেই। প্রথমে "%1$s" চালান।</string>
-    <string name="service_check_label_exit_ip">প্রস্থান IP</string>
-    <string name="service_check_label_premium">YouTube Premium</string>
     <string name="service_check_status_yes">YES</string>
     <string name="service_check_status_no">NO</string>
     <string name="service_check_status_ipblock">IPBLOCK</string>
     <string name="service_check_status_unknown">UNKNOWN</string>
-    <string name="service_check_value_none">-</string>
-    <string name="service_check_error">ত্রুটি: %1$s</string>
     <string name="title_user_asset_setting">অ্যাসেট ফাইল</string>
     <string name="title_sort_by_test_results">টেস্ট ফলাফল দ্বারা সাজানো</string>
     <string name="title_filter_config">কনফিগারেশন ফাইল ফিল্টার করুন</string>

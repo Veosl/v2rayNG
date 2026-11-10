@@ -136,6 +136,13 @@ fun MainScreen(
     if (shareQRCodeBitmap != null) {
         QRCodeDialog(bitmap = shareQRCodeBitmap, onDismiss = { onAction(MainAction.DismissQRCodeDialog) })
     }
+    uiState.serviceCheckDetails?.let { details ->
+        ServiceCheckDetailsDialog(
+            details = details,
+            onCopy = { checkId -> onAction(MainAction.CopyServiceCheckBody(checkId)) },
+            onDismiss = { onAction(MainAction.DismissServiceCheckDetails) },
+        )
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -179,6 +186,7 @@ fun MainScreen(
                             MainMoreMenuAction.SortByTestResults -> onAction(MainAction.SortByTestResults)
                             MainMoreMenuAction.TestAll -> onAction(MainAction.TestAllServers)
                             MainMoreMenuAction.TestAllRealPing -> onAction(MainAction.TestRealAllServers)
+                            MainMoreMenuAction.CheckYouTubeOnTestedConfigs -> onAction(MainAction.CheckYouTubeOnTestedConfigs)
                             MainMoreMenuAction.ClearServiceCheckResults -> onAction(MainAction.ClearServiceCheckResults)
                             MainMoreMenuAction.UpdateSubscriptions -> onAction(MainAction.UpdateSubscriptions)
                         }
@@ -246,6 +254,7 @@ fun MainScreen(
                                 shareTarget = Triple(guid, profile, true)
                             },
                             onRemoveServer = removeServer,
+                            onDetailsServer = { guid -> onAction(MainAction.ShowServiceCheckDetails(guid)) },
                             usageInfo = group.usageInfo,
                             groupTitle = group.remarks,
                             onOpenLink = { url -> onAction(MainAction.OpenSubscriptionLink(url)) },

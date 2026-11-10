@@ -36,6 +36,7 @@ enum class MainMoreMenuAction(@StringRes val labelRes: Int) {
     SortByTestResults(R.string.title_sort_by_test_results),
     TestAll(R.string.title_ping_all_server),
     TestAllRealPing(R.string.title_real_ping_all_server),
+    CheckYouTubeOnTestedConfigs(R.string.title_check_youtube_on_tested_configs),
     ClearServiceCheckResults(R.string.title_clear_service_check_results),
     UpdateSubscriptions(R.string.title_sub_update)
 }
@@ -50,6 +51,7 @@ internal enum class ServerMenuAction(
     ShareFullContent(R.string.share_method_full_content, isShareAction = true, supportsComplexProfiles = true),
     Edit(R.string.action_edit, isShareAction = false, supportsComplexProfiles = true),
     Delete(R.string.action_delete, isShareAction = false, supportsComplexProfiles = true),
+    ServiceCheckDetails(R.string.title_service_check_details, isShareAction = false, supportsComplexProfiles = true),
 }
 
 internal fun serverMenuActions(
@@ -97,6 +99,7 @@ fun ShareMethodDialog(
                 ServerMenuAction.ShareFullContent -> onAction(MainAction.ShareFullContent(guid))
                 ServerMenuAction.Edit -> onAction(MainAction.EditServer(guid, profile))
                 ServerMenuAction.Delete -> onRemove(guid, profile.remarks)
+                ServerMenuAction.ServiceCheckDetails -> onAction(MainAction.ShowServiceCheckDetails(guid))
             }
         },
         onDismiss = onDismiss

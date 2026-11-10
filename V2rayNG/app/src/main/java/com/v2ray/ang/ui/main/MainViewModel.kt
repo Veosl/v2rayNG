@@ -15,6 +15,7 @@ import com.v2ray.ang.dto.RealPingResult
 import com.v2ray.ang.dto.TestServiceMessage
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.ServersCache
+import com.v2ray.ang.dto.entities.ServiceCheckReport
 import com.v2ray.ang.dto.entities.SubscriptionCache
 import com.v2ray.ang.extension.delay
 import com.v2ray.ang.extension.isComplexType
@@ -23,6 +24,7 @@ import com.v2ray.ang.extension.moveItem
 import com.v2ray.ang.handler.SubscriptionInfoParser
 import com.v2ray.ang.ui.base.BaseViewModel
 import com.v2ray.ang.util.LogUtil
+import com.v2ray.ang.util.Utils
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -119,11 +121,21 @@ class MainViewModel(
     private val testRequests = MainTestRequests()
     private var bulkTestJob: Job? = null
 
+    // ---------- Service check ----------
+    // The reports live in their own store, they are read once and kept here. The rows
+    // only need the small summary of a report.
+    private val serviceCheckReports = ConcurrentHashMap<String, ServiceCheckReport>()
+
+    // Whether this ViewModel has seen a run start. A run that was already over when the
+    // screen was opened must not report a result.
+    private var serviceCheckRunStarted = false
+
     private val initialPageReady = CompletableDeferred<Unit>()
 
     // ---------- Service events ----------
     init {
         collectServiceEvents()
+        observeServiceCheckState()
         setupGroupTab()
     }
 
@@ -313,6 +325,10 @@ class MainViewModel(
             MainAction.RemoveInvalidServers -> removeInvalidServerAsync()
             MainAction.SortByTestResults -> sortByTestResultsAsync()
             MainAction.ClearServiceCheckResults -> clearServiceCheckResults()
+            MainAction.CheckYouTubeOnTestedConfigs -> toggleYouTubeCheck()
+            is MainAction.ShowServiceCheckDetails -> showServiceCheckDetails(action.guid)
+            MainAction.DismissServiceCheckDetails -> dismissServiceCheckDetails()
+            is MainAction.CopyServiceCheckBody -> copyServiceCheckBody(action.checkId)
             MainAction.UpdateSubscriptions -> importConfigViaSub(uiState.value.selectedGroupId)
             is MainAction.UpdateGroupSubscription -> importConfigViaSub(action.groupId)
             MainAction.ExportAll -> exportAllAsync()
@@ -443,7 +459,9 @@ class MainViewModel(
         return servers.map { server ->
             buildServerRowUiModel(
                 server = server,
-                subscriptionRemarks = subscriptionRemarks[server.profile.subscriptionId].orEmpty()
+                subscriptionRemarks = subscriptionRemarks[server.profile.subscriptionId].orEmpty(),
+                serviceCheck = serviceCheckReports[server.guid]?.toRowUiModel()
+                    ?: ServerServiceCheckUiModel(),
             )
         }
     }
@@ -515,6 +533,7 @@ class MainViewModel(
                 }
 
                 val selectedServers = loadGroup(selectedGroup, forceRefresh)
+                loadServiceCheckReports()
                 updateGroupUi(selectedGroup, selectedServers)
 
                 if (!initialPageReady.isCompleted) {
@@ -763,6 +782,7 @@ class MainViewModel(
                 ServiceCheckManager.cancelAndJoin()
                 withContext(ioDispatcher) {
                     dataSource.clearServiceCheckResults()
+                    refreshServiceCheckRows()
                 }
                 toastSuccess(R.string.toast_service_check_results_cleared)
             } catch (cancelled: CancellationException) {
@@ -772,6 +792,149 @@ class MainViewModel(
                 toastError(R.string.toast_failure)
             }
         }
+    }
+
+    // ---------- Service check ----------
+    /**
+     * Starts the service check of every profile of the current group that has a real
+     * delay result, or stops the running check.
+     *
+     * The run is started with the same API that the "YT" button of the next stage
+     * uses, so both start the same run.
+     */
+    private fun toggleYouTubeCheck() {
+        if (ServiceCheckManager.state.value.isRunning) {
+            ServiceCheckManager.cancel()
+            toast(R.string.toast_service_check_cancelled)
+            return
+        }
+        viewModelScope.launch {
+            val guids = withContext(ioDispatcher) { testedConfigGuids() }
+            if (guids.isEmpty()) {
+                toastError(
+                    dataSource.getString(
+                        R.string.toast_service_check_no_tested_configs,
+                        dataSource.getString(R.string.title_real_ping_all_server)
+                    )
+                )
+                return@launch
+            }
+            ServiceCheckManager.start(guids)
+            toast(dataSource.getString(R.string.toast_service_check_started, guids.size))
+        }
+    }
+
+    /**
+     * The GUIDs of the profiles of the current group that have a real delay result.
+     *
+     * An empty group id is the group that shows the servers of every subscription.
+     */
+    private fun testedConfigGuids(): List<String> {
+        val groupId = uiState.value.selectedGroupId
+        return dataSource.getServerGuidList(groupId).filter { guid ->
+            (dataSource.decodeAffiliationInfo(guid)?.testDelayMillis ?: 0L) > 0L
+        }
+    }
+
+    /**
+     * Watches the state of the service check manager.
+     *
+     * The manager lives in the application, so a run also survives the recreation of the
+     * activity. When the run is over, the rows are rebuilt, so the chips of the list
+     * show the new results.
+     */
+    private fun observeServiceCheckState() {
+        viewModelScope.launch {
+            ServiceCheckManager.state.collect { state ->
+                if (state.isRunning) {
+                    serviceCheckRunStarted = true
+                    return@collect
+                }
+                if (!serviceCheckRunStarted) return@collect
+                serviceCheckRunStarted = false
+                // The rows show the reports of the run, also when the run was stopped
+                // before every config was checked.
+                withContext(ioDispatcher) {
+                    refreshServiceCheckRows()
+                }
+                // A run that was stopped before every config was checked is not a
+                // finished run, it must not report a result.
+                if (state.total <= 0 || state.done < state.total) {
+                    return@collect
+                }
+                toast(
+                    dataSource.getString(
+                        R.string.toast_service_check_done,
+                        state.goodCount,
+                        state.total
+                    )
+                )
+            }
+        }
+    }
+
+    /**
+     * Reads the service check reports of every checked profile.
+     *
+     * The reports live in their own store, they never touch the real delay results.
+     */
+    private suspend fun loadServiceCheckReports() {
+        val guids = dataSource.getServiceCheckReportGuids()
+        val reports = HashMap<String, ServiceCheckReport>(guids.size)
+        guids.forEach { guid ->
+            dataSource.decodeServiceCheckReport(guid)?.let { reports[guid] = it }
+        }
+        serviceCheckReports.clear()
+        serviceCheckReports.putAll(reports)
+    }
+
+    /**
+     * Reads the service check reports again and rebuilds the rows of the current group.
+     */
+    private suspend fun refreshServiceCheckRows() {
+        loadServiceCheckReports()
+        val groupId = uiState.value.selectedGroupId
+        val servers = cacheMutex.withLock { groupDataCache[groupId] } ?: return
+        updateGroupUi(groupId, servers)
+    }
+
+    /**
+     * Shows the report of one profile in the details dialog.
+     */
+    private fun showServiceCheckDetails(guid: String) {
+        viewModelScope.launch {
+            val details = withContext(ioDispatcher) {
+                val report = dataSource.decodeServiceCheckReport(guid) ?: return@withContext null
+                val remarks = dataSource.decodeServerConfig(guid)?.remarks.orEmpty()
+                report.toDetailsUiModel(remarks)
+            }
+            if (details == null) {
+                toastError(R.string.toast_service_check_no_report)
+                return@launch
+            }
+            _uiState.update { it.copy(serviceCheckDetails = details) }
+        }
+    }
+
+    /**
+     * Closes the details dialog.
+     */
+    private fun dismissServiceCheckDetails() {
+        _uiState.update { it.copy(serviceCheckDetails = null) }
+    }
+
+    /**
+     * Copies the whole captured body of one check to the clipboard.
+     */
+    private fun copyServiceCheckBody(checkId: String) {
+        val details = _uiState.value.serviceCheckDetails ?: return
+        val body = details.bodyOf(checkId)
+        if (body.isNullOrEmpty()) {
+            toastError(R.string.toast_service_check_no_body)
+            return
+        }
+        Utils.setClipboard(app, body)
+        toastSuccess(R.string.toast_service_check_body_copied)
     }
 
     fun subscriptionIdChanged(id: String) {

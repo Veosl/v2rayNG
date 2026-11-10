@@ -348,19 +348,10 @@
     <string name="title_ping_all_server">測試 TCP 延遲（TCPing）</string>
     <string name="title_real_ping_all_server">測試真連接延遲</string>
     <!-- Service check -->
-    <string name="title_service_check">服務檢查</string>
-    <string name="service_check_action_start">開始</string>
-    <string name="service_check_running">正在檢查</string>
-    <string name="service_check_progress">%1$d/%2$d</string>
-    <string name="service_check_hint_no_tested_configs">還沒有設定檔的真連線延遲結果，請先執行「%1$s」。</string>
-    <string name="service_check_label_exit_ip">出口 IP</string>
-    <string name="service_check_label_premium">YouTube 進階版</string>
     <string name="service_check_status_yes">YES</string>
     <string name="service_check_status_no">NO</string>
     <string name="service_check_status_ipblock">IPBLOCK</string>
     <string name="service_check_status_unknown">UNKNOWN</string>
-    <string name="service_check_value_none">-</string>
-    <string name="service_check_error">錯誤：%1$s</string>
     <string name="title_user_asset_setting">資源檔案</string>
     <string name="title_sort_by_test_results">依測試結果排序</string>
     <string name="title_filter_config">篩選設定</string>

@@ -4,6 +4,7 @@ import com.v2ray.ang.dto.SubscriptionUpdateResult
 import com.v2ray.ang.dto.TestServiceMessage
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.ServerAffiliationInfo
+import com.v2ray.ang.dto.entities.ServiceCheckReport
 import com.v2ray.ang.dto.entities.SubscriptionCache
 import com.v2ray.ang.dto.entities.SubscriptionItem
 import kotlinx.coroutines.flow.Flow
@@ -43,6 +44,8 @@ interface MainDataSource : Closeable {
     fun clearAllTestDelayResults(guids: List<String>)
     fun sortByTestResultsForSub(subId: String)
     fun clearServiceCheckResults()
+    fun getServiceCheckReportGuids(): Set<String>
+    fun decodeServiceCheckReport(guid: String): ServiceCheckReport?
     fun getSubsList(): List<String>
 
     suspend fun importBatchConfig(

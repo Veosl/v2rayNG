@@ -182,7 +182,7 @@ Rules that apply to the whole task:
         only; the service check writes to its **own** MMKV store (its own key namespace
         and its own JSON payload) and never reads, writes or clears the delay field.
         “Clear service check results” clears the service-check store only.
-* [ ] B5. Main list row. Append to the existing delay display, without changing the row
+* [x] B5. Main list row. Append to the existing delay display, without changing the row
       height or removing anything:
       * the 2-letter exit country (YouTube country, else Google country), small text;
       * a “YT” chip: green = YT OK, red = premium NO, orange = captcha/IPBLOCK,
@@ -190,13 +190,20 @@ Rules that apply to the whole task:
       * a tiny “M” chip only when the music status is YES (green) or NO (red).
       Chips must handle RTL, long remarks (ellipsis) and dark/light theme (theme colors).
       The report includes an ASCII sketch of the row before and after.
-* [ ] B6. Details. Add **“Service check details”** to the row's existing overflow menu
+* [x] B6. Details. Add **“Service check details”** to the row's existing overflow menu
       (find it; if none exists, use the existing long-press menu). It opens a dialog or
       bottom sheet showing, per check: status, value, HTTP code, Location header and the
       first 4 KB of the body preview as selectable text, with a **Copy** button per check
       that copies the **full** captured body.
-* [ ] B7. Add ipregion's MIT license text (spec section 6) and the credit to
+* [x] B7. Add ipregion's MIT license text (spec section 6) and the credit to
       `assets/open_source_licenses.html`, following its structure.
+* [x] B8. Run trigger, so the run can be tested before the “YT” button of Stage C
+      exists. A more-menu entry **“Check YouTube on tested configs”** collects the guids
+      of the current group whose `testDelayMillis` is greater than 0 and calls
+      `ServiceCheckManager.start(guids)` — the same API the “YT” button will use. While a
+      run is active the same entry cancels it. A Toast shows the number of configs when
+      the run starts and another one shows “YouTube check done: X OK of Y” when the run
+      finishes (the state of `ServiceCheckManager` is observed).
 
 ### Status of the first B part (B1–B4, “B-core”)
 
@@ -212,11 +219,25 @@ Done and committed:
 * B4 — the `SERVICE_CHECK` MMKV store in `handler/MmkvManager.kt`, the cleanup hooks and
   the “Clear service check results” entry of the more-menu.
 
-Still open in this stage:
+### Status of the second B part (B5–B8, “B-UI”)
 
-* B5, B6, B7 are not started.
-* Nothing can start a service check run from the UI yet: `ServiceCheckManager.start()`
-  has no caller. The “YT” button of Stage C1 (or the B5/B6 work) will add one.
+Done:
+
+* B5 — the row model got a `serviceCheck` summary, the chips are drawn next to the delay
+  of the row (`ui/main/MainServiceCheckUi.kt`, `ui/main/MainServerPager.kt`). The chip
+  font is 10 sp, so the height of the row does not change.
+* B6 — `ui/main/MainServiceCheckDialog.kt` shows the report of one config. The entry
+  **“Service check details”** is in the row's overflow sheet, and the chips of the row
+  open the same dialog, because the single column row has no overflow button of its own
+  and a long press on the row is the drag handle of the reorderable list.
+* B7 — the ipregion credit and its MIT license text are in
+  `assets/open_source_licenses.html`.
+* B8 — the more-menu entry **“Check YouTube on tested configs”** starts the run of the
+  tested configs of the current group, cancels a running run and shows the Toasts.
+
+Still open:
+
+* Stage C is not started: there is no “YT” button and no long-press auto-connect yet.
 * The marker lists of `youtube_music_experimental` are empty, so that check always
   answers `UNKNOWN` until the user fills them in.
 * Nothing was compiled or run on a device yet: this checkout has no JDK, no Android

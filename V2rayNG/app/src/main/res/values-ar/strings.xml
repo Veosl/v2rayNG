@@ -348,19 +348,10 @@
     <string name="title_ping_all_server">اختبار تأخير TCP (TCPing)</string>
     <string name="title_real_ping_all_server">اختبار زمن الاستجابة الفعلي</string>
     <!-- Service check -->
-    <string name="title_service_check">فحص الخدمات</string>
-    <string name="service_check_action_start">ابدأ</string>
-    <string name="service_check_running">جارٍ الفحص</string>
-    <string name="service_check_progress">%1$d/%2$d</string>
-    <string name="service_check_hint_no_tested_configs">لا توجد نتيجة تأخير حقيقية بعد. شغّل "%1$s" أولاً.</string>
-    <string name="service_check_label_exit_ip">IP الخروج</string>
-    <string name="service_check_label_premium">YouTube Premium</string>
     <string name="service_check_status_yes">YES</string>
     <string name="service_check_status_no">NO</string>
     <string name="service_check_status_ipblock">IPBLOCK</string>
     <string name="service_check_status_unknown">UNKNOWN</string>
-    <string name="service_check_value_none">-</string>
-    <string name="service_check_error">خطأ: %1$s</string>
     <string name="title_user_asset_setting">ملفات الأصول</string>
     <string name="title_sort_by_test_results">الفرز حسب نتائج الاختبار</string>
     <string name="title_filter_config">تصفية ملف التكوين</string>
