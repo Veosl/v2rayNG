@@ -289,6 +289,107 @@ Still open:
   its delay, candidate guid and delay, time of the last switch, switch count; output:
   switch or not) with no Android dependencies, used by the run code.
 
+### Stage C2 — investigation of the long press (before the code)
+
+**The versions that the project really uses.** The Compose BOM `2026.09.00`
+(`V2rayNG/gradle/libs.versions.toml:22`) resolves `androidx.compose.material3:material3:1.4.0`,
+`androidx.compose.foundation:foundation:1.12.1` and `androidx.compose.ui:ui:1.12.1`
+(the versions are in the BOM pom of the BOM itself). **The sources are not in a local Gradle
+cache** (this checkout has no `~/.gradle` and no `~/.m2`), they were read from the read-only
+Google Maven repository: `material3-1.4.0-sources.jar`, `foundation-1.12.1-sources.jar` and
+`ui-1.12.1-sources.jar`. The line numbers below are the lines of those sources.
+
+**What the Material 3 FAB is.** `FloatingActionButton` (material3 1.4.0) has no long click
+and no `enabled` parameter. It is only a wrapper: it calls `Surface(onClick = …)` with
+`shape = FloatingActionButtonDefaults.shape`, `color = containerColor`,
+`contentColor = contentColorFor(containerColor)`,
+`tonalElevation = elevation.tonalElevation()`,
+`shadowElevation = elevation.shadowElevation(interactionSource).value` and
+`modifier.semantics { role = Role.Button }` (`FloatingActionButton.kt:149-167`); the content
+sits in a `Box(Modifier.defaultMinSize(56.dp, 56.dp), contentAlignment = Center)` (`:160-166`).
+The clickable `Surface` draws its background with `Modifier.surface(…)` and puts the click
+**after** it: `.clickable(interactionSource, indication = ripple(), enabled, onClick)`
+(`Surface.kt:216-233`). The ripple is therefore drawn **on top of** the background, and the
+clickable is **inside** the box that draws the background.
+
+**Option 1 — a wrapper with `pointerInput` / `detectTapGestures`: rejected.**
+`detectTapGestures` consumes the down (`TapGestureDetector.kt:132`), the up (`:166`) and
+every event until the pointer is up after a long press (`:148` `consumeUntilUp()`). The FAB
+keeps its own `clickable` inside the modifier that the caller passes, so a wrapper around it
+would eat the down of the button: the tap would stop working and the ripple would never
+appear. A hand written observer (a `pointerInput` that only watches the `Final` pass and
+never consumes) would keep the tap, but then the "no tap after a long press" would be our
+own flag inside the `onClick` of the FAB, and the `onLongClickLabel` would have to be added
+with a **second** semantics node next to the click node of the FAB (the click node of the
+FAB is a child of the node of the caller, a child never merges into its parent).
+
+**Option 2 — detection with the `interactionSource`: rejected.**
+The `interactionSource` of a `clickable` only carries `PressInteraction.Press/Release/Cancel`
+(`Clickable.kt:2042-2075`); there is no interaction that marks a long press. The
+`FloatingActionButton` has an `interactionSource` parameter (`FloatingActionButton.kt:116`),
+but it cannot tell a tap from a long press.
+
+**Why the Material 3 FAB cannot host a `combinedClickable` at all.**
+`Modifier.clickable` is a modifier node in foundation 1.12.1: `ClickableNode.handleDownEvent`
+**always** consumes the down, also when the button is disabled (`Clickable.kt:926-933`), and a
+gesture only starts for a down that is **not** consumed (`:878`
+`isChangedToDown(requireUnconsumed = true)`; the same check is in
+`CombinedClickableNode.onPointerEvent`, `:1113`). The child is served before the parent in
+the `Main` pass, so:
+* a `combinedClickable` **outside** the FAB never starts: the click of the FAB consumes the
+  down first;
+* a `combinedClickable` **inside** the FAB never starts either: the click of the FAB is the
+  parent and consumes the down first.
+The Material 3 FAB therefore has to be replaced by a `Surface` with the same look.
+
+**Option 3 — `combinedClickable` on a Surface based FAB: chosen.**
+`Modifier.combinedClickable` is stable in foundation 1.12.1 (`Clickable.kt:542-571`) and has
+`onLongClickLabel`, `onLongClick`, `role`, `interactionSource` and `indication`.
+
+* **The tap is not fired after a long press:** `CombinedClickableNode.handleDownEvent` starts
+  a job with `delay(viewConfiguration.longPressTimeoutMillis)`; the job calls `onLongClick`,
+  performs `HapticFeedbackType.LongPress` and sets `longPressTriggered = true`
+  (`Clickable.kt:1222-1235`). `handleUpEvent` runs the click only `if (!longPressTriggered)`
+  (`:1281-1303`), so the `onClick` of the button is **not** called after a long press.
+* **The haptic** is the one of the platform: `HapticFeedbackType.LongPress` (`:1229`), the
+  same type as the drag handle of the app (`ui/compose/Components.kt:276`).
+* **The pressed state:** `handlePressInteractionStart` emits `PressInteraction.Press` into the
+  `interactionSource` (`:2042-2055`), the indication of the modifier draws the ripple — the
+  same `ripple()` that the clickable `Surface` of Material 3 uses (`Surface.kt:229`).
+* **The accessibility:** the node of the clickable carries the `role`, the `onClick` action
+  and the `onLongClick` action with its label (`:1506-1516`, `:2003-2020`) and it merges its
+  children (`shouldMergeDescendantSemantics = true`, `:2000-2001`), so the content
+  description of the icon stays in the same node. One focusable node, one name, two actions.
+
+**The new button (the look of the FAB, copied from the sources of Material 3).**
+A `Surface` (the not clickable overload, `Surface.kt:96-133`) with:
+* `shape = FloatingActionButtonDefaults.shape` — the same shape as the FAB
+  (`FabBaselineTokens.ContainerShape` = `CornerLarge`);
+* `color = containerColor` — the same colours as today (`colorFabActive` / the inactive
+  colours), `contentColor = contentColorFor(containerColor)` — the same as the FAB;
+* `tonalElevation = 6.dp` and `shadowElevation = 6.dp` — `FabPrimaryContainerTokens.
+  ContainerElevation` = `ElevationTokens.Level3` = 6.dp, the pressed and the focused
+  elevation of the FAB are also 6.dp, only the **hover** elevation is 8.dp
+  (`ElevationTokens.Level4`). The animated elevation of the FAB cannot be reused,
+  `FloatingActionButtonElevation.shadowElevation` is `internal` (`FloatingActionButton.kt:620`),
+  so a mouse hover shows a 6 dp shadow instead of 8 dp. A touch device never hovers.
+* the content in a `Box(Modifier.defaultMinSize(56.dp, 56.dp), contentAlignment = Center)` —
+  the same size (`FabBaselineTokens.ContainerWidth/Height` = 56.dp);
+* the `combinedClickable` on **that** box, not on the `Surface`: the indication has to be
+  drawn after the background of the `Surface`, otherwise the background would cover the
+  ripple (the draw order of a modifier chain is the order of the chain, the content is
+  drawn last).
+
+**The semantics of the new button.** The click node is below the node of the `Surface`
+(`semantics(mergeDescendants = false) { isContainer = true }`, `Surface.kt:121-126`). The
+`isContainer` key is only declared and never read in compose ui 1.12.1 (it has no effect on
+the merging, the pruning uses `isTraversalGroup`), and the merging walks the children
+(`SemanticsNode.mergeConfig`, ui `SemanticsNode.kt:257-271`): the click node merges the
+content description of the icon and stays a node of its own, because a node that merges its
+descendants is not merged into its parent. The result is **one** focusable node with the
+role “button”, the name of the icon (“Start” / “Stop”), the click action and the long click
+action with its label.
+
 ---
 
 ## Stage F and C1 spec
@@ -367,6 +468,42 @@ Still open:
 * One run at a time (starting any run cancels the previous one). The screen stays on
   while a run is active. UI updates stay batched (400 ms). The Stage F live sort applies
   to this run too.
+
+#### Stage C1 Part 2 — investigation (before the code)
+
+1. **Select this server and (re)connect** — the row tap emits `MainAction.SelectServer(guid)`
+   (`MainServerPager.kt:396-407` -> `MainScreen.kt:249`); the Activity takes it at
+   `MainActivity.kt:116` -> `setSelectServer(guid)` (`:279-284`) -> `updateSelectedGuid(guid)`
+   (persists the guid in MMKV) -> `LauncherManager.restartService(this)` (restart of the
+   running daemon). The permission-aware start path is `LauncherManager.restartServiceOrStart(context, ::requestServiceStart)`
+   (`LauncherManager.kt:65-69`): it sends `MSG_STATE_RESTART` and, when no daemon answers,
+   calls `requestServiceStart()` (`MainActivity.kt:177-184`) -> `VpnService.prepare(this)` ->
+   `requestVpnPermission.launch(intent)` -> the launcher of `MainActivity.kt:62-65` ->
+   `startV2Ray()` (`:192-202`) -> `LauncherManager.startService(this)`, which reads the
+   selected guid from MMKV.
+2. **How the ViewModel asks the Activity** — there is no one-shot event in the main screen
+   yet (only the `onAction` callback of `MainScreen.kt:38-42`). The repo pattern for a
+   ViewModel -> Activity one-shot event is `BaseViewModel._viewModelEvent` (`Channel<ViewModelEvent>`,
+   `BaseViewModel.kt:40-41`) with a sealed event interface (`BackupViewModel.BackupViewModelEvent`)
+   that the Activity collects with `repeatOnLifecycle(STARTED)` (`BackupActivity.kt:68-89`).
+   Part 2 uses exactly that pattern: `MainViewModel.MainViewModelEvent.ConnectServer`.
+3. **Real delay finished / cancelled** — `MSG_MEASURE_CONFIG_FINISH` (`AppConfig.kt:198`)
+   -> `MainRepository.kt:73-75` -> `MainServiceEvent.MeasureConfigFinish(requestId)` ->
+   `MainViewModel.kt:221-230` -> `onTestsFinished(request.id)` (`:1471`).
+   Cancel: `MSG_MEASURE_CONFIG_CANCEL` (`AppConfig.kt:195`) -> `MainRepository.kt:76` ->
+   `MainServiceEvent.MeasureConfigCancelled` -> `MainViewModel.kt:236-241`; the cancel is
+   sent by `MainViewModel.cancelAllPing()` (`:1361-1374`) -> `MainRepository.cancelAllPing()`.
+4. **Which configs belong to the run** — the group id is captured at the start of the run
+   (`uiState.selectedGroupId`) and its GUIDs are read with `dataSource.getServerGuidList(groupId)`
+   (`MainRepository.kt:157-162`); the set of GUIDs is kept for the whole run, so a tab
+   change during the run cannot add or remove configs of the run.
+5. **The status text** — the delay progress arrives as `RealPingEvent.Progress("$left / $count")`
+   (`RealPingWorkerService.kt:105`) -> `MainServiceEvent.MeasureConfigNotify` ->
+   `pendingTestProgress` -> `lastDelayProgress` (`MainViewModel.kt:294-297`); the YT progress
+   is built from the manager state (`updateYtProgressText`, `:1014-1040`) into `lastYtProgress`;
+   `publishProgressText()` (`:306-311`) joins both with `service_check_progress_separator`
+   (" · ") and the bottom bar shows it as "Tests running: %s"
+   (`connection_running_task_left`, `MainBottomBar.kt:77-83`).
 
 ### Stage F — status
 
@@ -448,11 +585,126 @@ Implemented (uncommitted until the end of the stage):
   the enqueue of every real-delay result, the first-OK auto connect, the status text
   and the clearing of the old reports.
 
+### Stage C1 — Part 2 status (the “YT” button and the pipeline run)
+
+* [x] **The “YT” button**: a small Material 3 FAB (`SmallFloatingActionButton`) with the
+  text “YT”, directly left of the connect FAB (end padding 92 dp, the connect FAB ends
+  at 80 dp → a 12 dp gap) and centered on the same line (offset −20 dp against −28 dp,
+  40 dp against 56 dp high). The connect FAB keeps its behaviour and its colours.
+  The list padding (80 dp) clears the small button, it does not cover the last item.
+  While the run is active the button shows a `CircularProgressIndicator`.
+  The label and the two content descriptions are string resources.
+* [x] **The run of the button** (`MainAction.ToggleYouTubeRun` → `toggleYtRun`):
+  a tap starts the run of the group that is shown, a second tap cancels it. The start
+  order is: stop the previous run (`cancelAndJoin`) → remove the old reports of the
+  group and rebuild the rows → `ServiceCheckManager.beginPipeline(runId)` →
+  `testAllRealPing(concurrency = REAL_DELAY_CONCURRENCY_PIPELINE)` → `ytRunActive`.
+* [x] **The pipeline**: every real delay result with a delay > 0 of the group is
+  enqueued in `handleServiceEvent`, without waiting for the 500 ms flush
+  (`enqueuePipelineCheck`). `ServiceCheckManager.endInput()` is called when the real
+  delay test finishes. A cancel stops the real delay test and the service checks
+  (`ServiceCheckManager.cancel()`), the VPN stays connected.
+* [x] **The first OK auto connects** (`maybeAutoConnect`): the first event of the run
+  with `isYtOk` connects the config through the existing path
+  (`LauncherManager.restartServiceOrStart` → the VPN permission flow) with the toast
+  “Connected: `<remark>`”. It happens once per run.
+  * The user override: the selected guid and the connection state are stored at the
+    start of the run. A selection, a connect or a disconnect of the user sets
+    `ytUserInteracted`, then the run marks and checks but never connects.
+  * When the config is already the selected one and the service runs, the VPN is not
+    restarted.
+* [x] **The status text**: “Delay 120/300 · YT 8/40 · 2 OK”
+  (`service_check_progress_delay` + `service_check_progress_youtube` joined by
+  `service_check_progress_separator`). The screen stays on while the run is active
+  (`KeepScreenOn`, the pattern of the deleted `ServiceCheckActivity`).
+* [x] **The end of the run**: the button is reset, the final YT sort runs when
+  “Auto sort after testing” is on, the toast “YouTube check done: X OK of Y” is shown.
+* [x] **The concurrency**: the pipeline uses `min(user setting, 12)`
+  (`resolveRealPingConcurrency`), the user setting is never written.
+* [ ] **Not verified**: nothing could be built or run here (no JDK/SDK/Gradle), the
+  behaviour is unverified until the user builds it and tests it on the phone.
+
+### Stage C2 — status (long press on the connect FAB = fastest server)
+
+* [x] **The long press** (`MainAction.ToggleFastestRun` → `toggleFastestRun`): the
+  Material 3 FAB has no long click and its own click always consumes the down of the
+  pointer, so the connect button is now a copy of the Material 3 FAB: a `Surface` with
+  the same shape (`FloatingActionButtonDefaults.shape`), the same colours
+  (`contentColorFor(containerColor)`), the same size (56 dp, `FabBaselineTokens`) and the
+  same elevation (6 dp, `FabPrimaryContainerTokens.ContainerElevation` =
+  `ElevationTokens.Level3`), with a `Box` **inside** the surface that carries
+  `Modifier.combinedClickable` (`role = Role.Button`, `onLongClickLabel`,
+  `onLongClick`, `indication = ripple()`).
+  * **The tap is not fired after a long press**: the long press job of the combined
+    clickable sets `longPressTriggered = true` (foundation `Clickable.kt:1222-1235`)
+    and the click of the up event runs only `if (!longPressTriggered)`
+    (`Clickable.kt:1281-1303`).
+  * **The haptic**: `HapticFeedbackType.LongPress` (`Clickable.kt:1229`), the platform
+    haptic, the same type as the drag handle of the app.
+  * **The pressed state and the ripple**: `PressInteraction.Press` goes into the
+    interaction source (`Clickable.kt:2042-2055`) and the `ripple()` is drawn, the same
+    indication as the clickable `Surface` of Material 3 (`Surface.kt:229`).
+  * **The accessibility**: one node with the role “button”, the name of the icon
+    (“Start” / “Stop”), the click action and the long click action with its label
+    (`Clickable.kt:1506-1516`, `:2003-2020`); the node merges its children
+    (`shouldMergeDescendantSemantics = true`, `:2000-2001`), so the content description
+    of the icon stays in that one node.
+  * **The tap keeps its behaviour**: the same `MainAction.ToggleService` with the same
+    rotation animation, the same colours and the same icon.
+* [x] **One mode for the automatic runs**: `MainAutoMode` (`NONE`, `YT_PIPELINE`,
+  `FASTEST`) in `MainContract.kt`; `MainUiState.autoMode` replaces `isYtRunActive`.
+  The user-override flag (`autoUserInteracted`), the one-shot event
+  (`MainViewModelEvent.ConnectServer`) and the connect path of the Activity are shared
+  with the run of the “YT” button, they are not duplicated.
+* [x] **The run** (`startFastestRun`): the group of the screen is captured, the previous
+  run is stopped (the “YT” pipeline, the menu run of the service check and an earlier
+  fastest run), the real delay test starts with the **normal** path
+  (`testAllRealPing(groupId = groupId)`, concurrency 0 = the setting of the user, no
+  service check). The toast “Finding the fastest server…” is shown when the run
+  starts. A second long press stops the run, the VPN stays connected.
+* [x] **The decision** (`core/FastestSwitchDecision.kt`): a pure Kotlin class without
+  Android imports. `decide(input)` returns `SWITCH` or `STAY`. The thresholds live in
+  `ServiceCheckTuning` (`SWITCH_MIN_IMPROVEMENT_PERCENT = 30`,
+  `SWITCH_MIN_IMPROVEMENT_MS = 50L`, `SWITCH_MIN_INTERVAL_MS = 10_000L`,
+  `SWITCH_MAX_PER_RUN = 3`). A candidate must be at least 30 % **and** at least 50 ms
+  faster; the number of switches and the time since the last switch are checked inside
+  `decide`.
+* [x] **The behaviour of the run** (`evaluateFastestCandidate`, called in the
+  `MeasureConfigSuccess` branch of `handleServiceEvent`, no flush and no store read):
+  * not connected, or connected to a config outside of the group → the **first** result
+    with a delay > 0 is connected, it counts as switch #1;
+  * connected to a config of the group → the base is the delay of that config **in this
+    run**; until it arrives the best candidate is remembered and nothing is switched;
+    when it arrives the best candidate is compared with it; if the test of the connected
+    config fails (delay ≤ 0) the best candidate is connected;
+  * afterwards every result with a delay > 0 goes through `decide()`.
+* [x] **The user override**: a selection, a connect or a disconnect of the user after
+  the start of the run stops every automatic switch, the test keeps running.
+* [x] **The toast on every connect**: the existing `toast_service_check_connected`
+  (“Connected: `<remark>`”).
+* [x] **The end of the run**: when the real delay test finishes, the run forgets its
+  state and shows no toast (`onTestsFinished` → `endFastestRun`).
+* [x] **The screen stays on** while the run is active
+  (`KeepScreenOn(autoMode != MainAutoMode.NONE)`).
+* [x] **The real delay results are not touched**: the run uses the normal real delay
+  path, the service check data has its own store and never overwrites
+  `ServerAffiliationInfo.testDelayMillis`.
+* [x] **The deviations** (not in the spec, chosen here):
+  * the shadow is always 6 dp, the Material 3 button raises it to 8 dp on a mouse
+    hover (the animated elevation of the FAB is `internal`, a touch device never
+    hovers);
+  * the second long press shows the toast “Fastest server search cancelled”;
+  * the toast “Finding the fastest server…” comes from the ViewModel when the run
+    really starts (a group without configs shows the error toast instead).
+* [ ] **Not verified**: nothing could be built or run here (no JDK/SDK/Gradle), the
+  behaviour is unverified until the user builds it and tests it on the phone.
+
 ## In progress
 
-NEXT STEP: Part 1 is committed — wait for the user's go, then implement Part 2 (the “YT”
-button, the pipeline start, the first-OK auto connect with the user override rule, the
-status text and the clearing of the old reports).
+NEXT STEP: Stage C2 is committed — wait for the user’s test on the phone. Open points
+for the next stage: the status line flickers to “Not connected” for a moment when the
+auto connect restarts the VPN (`StateStartSuccess` clears the testing text), and a
+rotation during the run loses the button state (the run itself continues).
 
 ---
 
