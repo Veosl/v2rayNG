@@ -44,6 +44,8 @@ android {
             applicationIdSuffix = ".dev"
         }
         release {
+            // Release builds are installed side by side with the original v2rayNG app.
+            applicationIdSuffix = ".custom"
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
