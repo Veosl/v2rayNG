@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
+import com.v2ray.ang.core.FastestSwitchDecision
 import com.v2ray.ang.core.ServiceCheckEvent
 import com.v2ray.ang.core.ServiceCheckManager
 import com.v2ray.ang.core.ServiceCheckRunState
@@ -165,6 +166,11 @@ class MainViewModel(
     private val pendingServiceCheckReports = linkedMapOf<String, ServiceCheckReport>()
     private var serviceCheckFlushJob: Job? = null
 
+    // The automatic run that is active. Only one run checks at a time, the run of the
+    // "YT" button and the run that looks for the fastest config never run together.
+    @Volatile
+    private var autoMode: MainAutoMode = MainAutoMode.NONE
+
     // Whether a service check run is active. The list is sorted by the YouTube result
     // while a run is active.
     @Volatile
@@ -189,7 +195,7 @@ class MainViewModel(
 
     // Whether the user selected a config or connected or disconnected during the run.
     // The automatic connection stops for the rest of the run.
-    private var ytUserInteracted = false
+    private var autoUserInteracted = false
 
     // Whether the automatic connection already happened. It happens once per run.
     private var ytAutoConnectDone = false
@@ -198,6 +204,39 @@ class MainViewModel(
     // whether the automatic connection would change something.
     private var ytStartSelectedGuid: String? = null
     private var ytStartConnected = false
+
+    // ---------- Fastest run ----------
+    // The id of the real delay request of the fastest run. Only the results of this
+    // request belong to the run.
+    private var fastestRequestId: String = ""
+
+    // The GUIDs of the configs of the fastest run. The group is captured at the start
+    // of the run, a tab change during the run does not change the run.
+    private var fastestGuids: Set<String> = emptySet()
+
+    // The config the fastest run is connected to. It is null when the run starts
+    // without a connection or with a connection to a config outside of its group.
+    private var fastestConnectedGuid: String? = null
+
+    // The delay of the connected config from the running test. It is null while the
+    // result of the connected config has not arrived.
+    private var fastestBaselineDelay: Long? = null
+
+    // The best candidate that was seen before the delay of the connected config
+    // arrived. The run does not switch before the base of the comparison is known.
+    private var fastestCandidateGuid: String? = null
+    private var fastestCandidateDelay: Long? = null
+
+    // The number of switches of the fastest run and the time of the last switch.
+    private var fastestSwitchCount: Int = 0
+    private var fastestLastSwitchAtMs: Long? = null
+
+    // The config that the fastest run connected itself. It is null while the run did
+    // not connect a config.
+    private var fastestAutoSelectedGuid: String? = null
+
+    // The selected config at the start of the fastest run.
+    private var fastestStartSelectedGuid: String? = null
 
     // The progress texts of the running tests. They are shown together in one status
     // line, the delay test and the service check can run at the same time.
@@ -256,6 +295,9 @@ class MainViewModel(
                 // The config is checked as soon as its delay arrives, the check does
                 // not wait for the flush of the delay results.
                 enqueuePipelineCheck(event.result, event.requestId)
+                // The fastest run looks at the result as well, it does not wait for the
+                // flush of the delay results either.
+                evaluateFastestCandidate(event.result, event.requestId)
             }
 
             is MainServiceEvent.MeasureConfigNotify -> {
@@ -426,8 +468,8 @@ class MainViewModel(
     private fun mutableServerGroupState(groupId: String): MutableStateFlow<ServerGroupUiState> =
         groupUiFlows.computeIfAbsent(groupId) { MutableStateFlow(ServerGroupUiState()) }
 
-    private fun currentServers(): List<ServersCache> =
-        mutableServerGroupState(uiState.value.selectedGroupId).value.servers
+    private fun currentServers(groupId: String = uiState.value.selectedGroupId): List<ServersCache> =
+        mutableServerGroupState(groupId).value.servers
 
     // ---------- Action handler ----------
     fun onAction(action: MainAction) {
@@ -435,12 +477,15 @@ class MainViewModel(
             MainAction.Initialize -> initialize()
             MainAction.RefreshGroups -> setupGroupTab(forceRefresh = true)
             MainAction.TestAllServers -> {
-                // Only one run at a time, a run of the "YT" button is stopped first.
+                // Only one run at a time, the runs of the "YT" button and of the
+                // fastest config are stopped first.
+                cancelFastestRun(showToast = false)
                 cancelServiceCheckRun()
                 testAllRealPing(true)
             }
 
             MainAction.TestRealAllServers -> {
+                cancelFastestRun(showToast = false)
                 cancelServiceCheckRun()
                 testAllRealPing()
             }
@@ -449,6 +494,7 @@ class MainViewModel(
                 // A run of the "YT" button waits for the results of the real delay
                 // test, it cannot stay open when the test is stopped.
                 cancelServiceCheckRun()
+                cancelFastestRun(showToast = false)
             }
             MainAction.RemoveAllServers -> removeAllServerAsync()
             MainAction.RemoveDuplicateServers -> removeDuplicateServerAsync()
@@ -458,6 +504,7 @@ class MainViewModel(
             MainAction.ClearServiceCheckResults -> clearServiceCheckResults()
             MainAction.CheckYouTubeOnTestedConfigs -> toggleYouTubeCheck()
             MainAction.ToggleYouTubeRun -> toggleYtRun()
+            MainAction.ToggleFastestRun -> toggleFastestRun()
             is MainAction.ShowServiceCheckDetails -> showServiceCheckDetails(action.guid)
             MainAction.DismissServiceCheckDetails -> dismissServiceCheckDetails()
             is MainAction.CopyServiceCheckBody -> copyServiceCheckBody(action.checkId)
@@ -1004,6 +1051,9 @@ class MainViewModel(
             toast(R.string.toast_service_check_cancelled)
             return
         }
+        // Only one run at a time, the run that looks for the fastest config is stopped
+        // first.
+        cancelFastestRun(showToast = false)
         viewModelScope.launch {
             val guids = withContext(ioDispatcher) { testedConfigGuids() }
             if (guids.isEmpty()) {
@@ -1065,6 +1115,7 @@ class MainViewModel(
                 return@launch
             }
             // A run that is still active is stopped first, only one run checks at a time.
+            cancelFastestRun(showToast = false)
             cancelServiceCheckRun(showToast = false)
             // The workers are awaited, so no report of the previous run can be written
             // after the reports of the group were removed.
@@ -1079,13 +1130,14 @@ class MainViewModel(
             // user.
             ytStartSelectedGuid = uiState.value.selectedGuid
             ytStartConnected = uiState.value.isRunning
-            ytUserInteracted = false
+            autoUserInteracted = false
             ytAutoConnectDone = false
             ytRunGuids = guids.toHashSet()
             ytRunGroupId = groupId
             val runId = ServiceCheckManager.newRunId()
             ytPipelineRunId = runId
-            _uiState.update { it.copy(isYtRunActive = true) }
+            autoMode = MainAutoMode.YT_PIPELINE
+            _uiState.update { it.copy(autoMode = MainAutoMode.YT_PIPELINE) }
             ServiceCheckManager.beginPipeline(runId)
             // The real delay test starts with the limit of the pipeline, the user
             // setting is never changed.
@@ -1116,7 +1168,10 @@ class MainViewModel(
         ytPipelineRequestId = ""
         ytRunGuids = emptySet()
         ytAutoConnectDone = true
-        _uiState.update { it.copy(isYtRunActive = false) }
+        if (autoMode == MainAutoMode.YT_PIPELINE) {
+            autoMode = MainAutoMode.NONE
+        }
+        _uiState.update { it.copy(autoMode = autoMode) }
         ServiceCheckManager.cancel()
         if (showToast) {
             toast(R.string.toast_service_check_cancelled)
@@ -1134,13 +1189,14 @@ class MainViewModel(
     }
 
     /**
-     * Remembers that the user took over during a run of the "YT" button.
+     * Remembers that the user took over during a run of the "YT" button or during the
+     * run that looks for the fastest config.
      *
      * The automatic connection stops for the rest of the run, the check keeps running.
      */
     fun onUserInteraction() {
-        if (ytPipelineRunId == 0L) return
-        ytUserInteracted = true
+        if (autoMode == MainAutoMode.NONE) return
+        autoUserInteracted = true
     }
 
     /**
@@ -1173,10 +1229,10 @@ class MainViewModel(
         if (!event.isYtOk) return
         val runId = ytPipelineRunId
         if (runId == 0L || event.runId != runId) return
-        if (ytAutoConnectDone || ytUserInteracted) return
+        if (ytAutoConnectDone || autoUserInteracted) return
         // The selection was changed by something else than the automatic connection.
         if (uiState.value.selectedGuid != ytStartSelectedGuid) {
-            ytUserInteracted = true
+            autoUserInteracted = true
             return
         }
         ytAutoConnectDone = true
@@ -1192,6 +1248,238 @@ class MainViewModel(
         viewModelScope.launch {
             _viewModelEvent.send(MainViewModelEvent.ConnectServer(event.guid, remark))
         }
+    }
+
+    // ---------- Fastest run ----------
+    /**
+     * Starts the run that looks for the fastest config, or stops the running run.
+     *
+     * The run measures the real delay of every config of the group that is shown and
+     * connects the fastest config that is fast enough. A second long press stops the
+     * run, the VPN stays connected.
+     */
+    private fun toggleFastestRun() {
+        if (autoMode == MainAutoMode.FASTEST) {
+            cancelFastestRun()
+            return
+        }
+        startFastestRun()
+    }
+
+    /**
+     * Starts the run that looks for the fastest config.
+     *
+     * The order of the start is fixed: the previous run is stopped, the group of the
+     * screen is captured and the real delay test starts with the concurrency of the
+     * user. No service check runs in this mode and the user setting is never changed.
+     */
+    private fun startFastestRun() {
+        viewModelScope.launch {
+            val groupId = uiState.value.selectedGroupId
+            val guids = withContext(ioDispatcher) { dataSource.getServerGuidList(groupId) }
+            if (guids.isEmpty()) {
+                toastError(dataSource.getString(R.string.toast_service_check_no_configs))
+                return@launch
+            }
+            // A run that is still active is stopped first, only one run checks at a time.
+            cancelServiceCheckRun(showToast = false)
+            // A standalone run of the menu is stopped as well.
+            if (ServiceCheckManager.state.value.isRunning) {
+                ServiceCheckManager.cancel()
+            }
+            // The run remembers what was selected, so it can tell its own change from a
+            // change of the user.
+            val selectedGuid = uiState.value.selectedGuid
+            fastestStartSelectedGuid = selectedGuid
+            autoUserInteracted = false
+            fastestGuids = guids.toHashSet()
+            // The connected config is the base of the comparison of the run, but only
+            // when it is a config of the group of the run. Otherwise the run connects
+            // the first config with a delay.
+            fastestConnectedGuid = if (uiState.value.isRunning &&
+                selectedGuid != null &&
+                guids.contains(selectedGuid)
+            ) {
+                selectedGuid
+            } else {
+                null
+            }
+            fastestBaselineDelay = null
+            fastestCandidateGuid = null
+            fastestCandidateDelay = null
+            fastestSwitchCount = 0
+            fastestLastSwitchAtMs = null
+            fastestAutoSelectedGuid = null
+            autoMode = MainAutoMode.FASTEST
+            _uiState.update { it.copy(autoMode = MainAutoMode.FASTEST) }
+            // The real delay test starts with the concurrency of the user, the user
+            // setting is never changed.
+            val requestId = testAllRealPing(groupId = groupId)
+            if (requestId.isEmpty()) {
+                // There is nothing to measure, the run cannot take any config.
+                cancelFastestRun(showToast = false)
+                return@launch
+            }
+            fastestRequestId = requestId
+            toast(dataSource.getString(R.string.toast_fastest_searching))
+        }
+    }
+
+    /**
+     * Stops the run that looks for the fastest config.
+     *
+     * The real delay test of the run is stopped, the VPN stays connected.
+     *
+     * @param showToast Whether the cancel is shown to the user.
+     */
+    private fun cancelFastestRun(showToast: Boolean = true) {
+        if (autoMode != MainAutoMode.FASTEST) return
+        cancelAllPing()
+        endFastestRun()
+        if (showToast) {
+            toast(R.string.toast_fastest_cancelled)
+        }
+    }
+
+    /**
+     * Ends the run that looks for the fastest config and forgets its state.
+     *
+     * The run shows no toast when it ends, the test of the run is over.
+     */
+    private fun endFastestRun() {
+        autoMode = MainAutoMode.NONE
+        fastestRequestId = ""
+        fastestGuids = emptySet()
+        fastestConnectedGuid = null
+        fastestBaselineDelay = null
+        fastestCandidateGuid = null
+        fastestCandidateDelay = null
+        fastestSwitchCount = 0
+        fastestLastSwitchAtMs = null
+        fastestAutoSelectedGuid = null
+        fastestStartSelectedGuid = null
+        _uiState.update { it.copy(autoMode = MainAutoMode.NONE) }
+    }
+
+    /**
+     * Looks at a result of the real delay test for the run that looks for the fastest
+     * config.
+     *
+     * The result is used as soon as it arrives: the run does not wait for the flush of
+     * the delay results and it reads no store.
+     *
+     * @param result The result of the real delay test.
+     * @param requestId The id of the real delay request of the result.
+     */
+    private fun evaluateFastestCandidate(result: RealPingResult, requestId: String) {
+        if (autoMode != MainAutoMode.FASTEST || requestId != fastestRequestId) return
+        if (result.guid !in fastestGuids) return
+        // The user took over, the run keeps testing but it never connects again.
+        if (fastestUserTookOver()) return
+        val now = SystemClock.elapsedRealtime()
+        val connectedGuid = fastestConnectedGuid
+        if (connectedGuid == null) {
+            // The run is not connected: the first config with a delay is connected, it
+            // counts as the first switch of the run.
+            if (result.delayMillis <= 0L) return
+            fastestConnectedGuid = result.guid
+            fastestBaselineDelay = result.delayMillis
+            fastestSwitchCount = 1
+            fastestLastSwitchAtMs = now
+            connectFastestConfig(result.guid)
+            return
+        }
+        if (result.guid == connectedGuid) {
+            // The result of the connected config is the base of the comparison of the
+            // run. The best candidate that was seen before is compared with it now.
+            fastestBaselineDelay = result.delayMillis
+            val candidateGuid = fastestCandidateGuid
+            val candidateDelay = fastestCandidateDelay
+            fastestCandidateGuid = null
+            fastestCandidateDelay = null
+            if (candidateGuid != null && candidateDelay != null) {
+                tryFastestSwitch(candidateGuid, candidateDelay, now)
+            }
+            return
+        }
+        if (result.delayMillis <= 0L) return
+        if (fastestBaselineDelay == null) {
+            // The base of the comparison is not known yet: the best candidate is
+            // remembered and the run does not switch.
+            val bestDelay = fastestCandidateDelay
+            if (bestDelay == null || result.delayMillis < bestDelay) {
+                fastestCandidateGuid = result.guid
+                fastestCandidateDelay = result.delayMillis
+            }
+            return
+        }
+        tryFastestSwitch(result.guid, result.delayMillis, now)
+    }
+
+    /**
+     * Connects the candidate when it is fast enough.
+     *
+     * The decision is made by [FastestSwitchDecision], it knows the thresholds of the
+     * run.
+     *
+     * @param candidateGuid The GUID of the candidate.
+     * @param candidateDelay The delay of the candidate in the running test.
+     * @param now The current time of the device.
+     */
+    private fun tryFastestSwitch(candidateGuid: String, candidateDelay: Long, now: Long) {
+        val millisSinceLastSwitch = fastestLastSwitchAtMs?.let { now - it }
+        val decision = FastestSwitchDecision.decide(
+            FastestSwitchDecision.Input(
+                connectedGuid = fastestConnectedGuid,
+                connectedDelay = fastestBaselineDelay,
+                candidateGuid = candidateGuid,
+                candidateDelay = candidateDelay,
+                millisSinceLastSwitch = millisSinceLastSwitch,
+                switchCount = fastestSwitchCount,
+            )
+        )
+        if (decision != FastestSwitchDecision.Decision.SWITCH) return
+        fastestSwitchCount += 1
+        fastestLastSwitchAtMs = now
+        fastestConnectedGuid = candidateGuid
+        // The new connected config is the base of the comparison from now on.
+        fastestBaselineDelay = candidateDelay
+        connectFastestConfig(candidateGuid)
+    }
+
+    /**
+     * Connects a config of the run that looks for the fastest config.
+     *
+     * The Activity owns the connect path, the ViewModel asks for it with the same event
+     * that the run of the "YT" button uses.
+     *
+     * @param guid The GUID of the config.
+     */
+    private fun connectFastestConfig(guid: String) {
+        fastestAutoSelectedGuid = guid
+        viewModelScope.launch {
+            val remark = withContext(ioDispatcher) {
+                dataSource.decodeServerConfig(guid)?.remarks.orEmpty()
+            }
+            _viewModelEvent.send(MainViewModelEvent.ConnectServer(guid, remark))
+        }
+    }
+
+    /**
+     * Returns whether the user took over during the run that looks for the fastest
+     * config.
+     *
+     * A selection, a connection or a disconnection of the user stops the automatic
+     * switching for the rest of the run. A selection that the run did not make itself
+     * stops it as well.
+     */
+    private fun fastestUserTookOver(): Boolean {
+        if (autoUserInteracted) return true
+        // The run has not connected a config yet: a selection of the user stops the run.
+        if (fastestAutoSelectedGuid == null) {
+            return uiState.value.selectedGuid != fastestStartSelectedGuid
+        }
+        return false
     }
 
     /**
@@ -1230,7 +1518,10 @@ class MainViewModel(
                     ytPipelineRunId = 0L
                     ytPipelineRequestId = ""
                     ytRunGuids = emptySet()
-                    _uiState.update { it.copy(isYtRunActive = false) }
+                    if (autoMode == MainAutoMode.YT_PIPELINE) {
+                        autoMode = MainAutoMode.NONE
+                    }
+                    _uiState.update { it.copy(autoMode = autoMode) }
                 }
                 // The rows show the reports of the run, also when the run was stopped
                 // before every config was checked.
@@ -1651,18 +1942,23 @@ class MainViewModel(
     }
 
     /**
-     * Starts a real-delay test of the current group.
+     * Starts a real-delay test of a group.
      *
      * @param onlyTcp Whether only the TCP delay is measured.
      * @param concurrency The number of tests that run at the same time. Zero means the
      * user setting is used, a positive number is the limit of this run: a lower user
      * setting is used as it is. The user setting itself is never changed.
+     * @param groupId The group that is measured. It is the group of the screen by
+     * default, a run that captured its group at the start passes its own group.
      * @return The id of the request, empty when the test did not start.
      */
-    fun testAllRealPing(onlyTcp: Boolean = false, concurrency: Int = 0): String {
+    fun testAllRealPing(
+        onlyTcp: Boolean = false,
+        concurrency: Int = 0,
+        groupId: String = uiState.value.selectedGroupId,
+    ): String {
         cancelAllPing()
-        val groupId = uiState.value.selectedGroupId
-        val servers = currentServers()
+        val servers = currentServers(groupId)
         if (servers.isEmpty()) {
             return ""
         }
@@ -1735,6 +2031,11 @@ class MainViewModel(
         // queue was checked.
         if (ytPipelineRunId != 0L) {
             ServiceCheckManager.endInput()
+        }
+        // The run that looks for the fastest config is over, it forgets its state and
+        // it shows no toast.
+        if (autoMode == MainAutoMode.FASTEST && fastestRequestId == requestId) {
+            endFastestRun()
         }
         if (ytRunActive) {
             // A service check is still running, its watcher sorts the list by the

@@ -50,7 +50,7 @@ fun MainScreen(
     val groups = uiState.groups
     val isLoading by mainViewModel.isLoading.collectAsStateWithLifecycle()
     val isRunning = uiState.isRunning
-    val isYtRunActive = uiState.isYtRunActive
+    val autoMode = uiState.autoMode
     val displayText = mainViewModel.formatStatus(uiState.status)
     val selectedGuid = uiState.selectedGuid
     val doubleColumnDisplay = uiState.doubleColumnDisplay
@@ -86,8 +86,8 @@ fun MainScreen(
     val lazyListStates = remember { mutableStateMapOf<String, LazyListState>() }
     val lazyGridStates = remember { mutableStateMapOf<String, LazyGridState>() }
 
-    // The screen stays on while a run of the "YT" button is active.
-    KeepScreenOn(isYtRunActive)
+    // The screen stays on while an automatic run is active.
+    KeepScreenOn(autoMode != MainAutoMode.NONE)
 
     LaunchedEffect(groups) {
         val validGroupIds = groups.map { it.id }.toSet()
@@ -208,7 +208,7 @@ fun MainScreen(
                 MainBottomBar(
                     displayText = displayText,
                     isRunning = isRunning,
-                    isYtRunActive = isYtRunActive,
+                    autoMode = autoMode,
                     isDarkTheme = isDarkTheme,
                     onAction = onAction
                 )

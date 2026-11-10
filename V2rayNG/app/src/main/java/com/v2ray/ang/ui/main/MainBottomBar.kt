@@ -4,11 +4,13 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
@@ -18,11 +20,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.contentColorFor
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -33,6 +38,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -44,18 +50,29 @@ import com.v2ray.ang.ui.compose.colorFabInactiveDark
 import com.v2ray.ang.ui.compose.colorFabInactiveLight
 import kotlinx.coroutines.launch
 
+// The values of the Material 3 floating action button. They are the tokens of
+// Material 3: the size is `FabBaselineTokens.ContainerWidth/Height`, the elevation is
+// `FabPrimaryContainerTokens.ContainerElevation` (`ElevationTokens.Level3`).
+private val connectFabSize = 56.dp
+private val connectFabElevation = 6.dp
+
 @Composable
 fun MainBottomBar(
     displayText: String,
     isRunning: Boolean,
-    isYtRunActive: Boolean,
+    autoMode: MainAutoMode,
     isDarkTheme: Boolean,
     onAction: (MainAction) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val rotationAnim = remember { Animatable(0f) }
+    val isYtRunActive = autoMode == MainAutoMode.YT_PIPELINE
+    val isFastestRunActive = autoMode == MainAutoMode.FASTEST
     val ytContentDescription = stringResource(
         if (isYtRunActive) R.string.acc_service_check_cancel else R.string.acc_service_check_start
+    )
+    val fastestLongClickLabel = stringResource(
+        if (isFastestRunActive) R.string.acc_fastest_cancel else R.string.acc_fastest_start
     )
 
     LaunchedEffect(isRunning) {
@@ -90,7 +107,7 @@ fun MainBottomBar(
                 )
             }
         }
-        FloatingActionButton(
+        ConnectFab(
             onClick = {
                 if (!isRunning) {
                     scope.launch {
@@ -102,6 +119,8 @@ fun MainBottomBar(
                 }
                 onAction(MainAction.ToggleService)
             },
+            onLongClick = { onAction(MainAction.ToggleFastestRun) },
+            longClickLabel = fastestLongClickLabel,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(end = 24.dp)
@@ -156,6 +175,62 @@ fun MainBottomBar(
                     modifier = Modifier.clearAndSetSemantics { },
                 )
             }
+        }
+    }
+}
+
+/**
+ * The connect button of the main screen.
+ *
+ * It is a copy of the Material 3 floating action button: the Material 3 button has no
+ * long click and its own click always consumes the down of the pointer, so a long
+ * click can only live in a button that is built here. The look is the look of the
+ * Material 3 button: the same shape, the same colours, the same size and the same
+ * ripple.
+ *
+ * The clickable is on the box **inside** the surface, because the ripple of a modifier
+ * is drawn before the background of a modifier that comes later in the chain. The
+ * content description of the icon is merged into the node of the clickable, so the
+ * button stays one node for the screen readers.
+ *
+ * @param onClick What the tap of the button does.
+ * @param onLongClick What the long press of the button does.
+ * @param longClickLabel The name of the long press for the screen readers.
+ * @param containerColor The colour of the button.
+ * @param modifier The modifier of the button.
+ * @param content The content of the button.
+ */
+@Composable
+private fun ConnectFab(
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    longClickLabel: String,
+    containerColor: Color,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        modifier = modifier,
+        shape = FloatingActionButtonDefaults.shape,
+        color = containerColor,
+        contentColor = contentColorFor(containerColor),
+        tonalElevation = connectFabElevation,
+        shadowElevation = connectFabElevation
+    ) {
+        Box(
+            modifier = Modifier
+                .defaultMinSize(minWidth = connectFabSize, minHeight = connectFabSize)
+                .combinedClickable(
+                    interactionSource = null,
+                    indication = ripple(),
+                    role = Role.Button,
+                    onLongClickLabel = longClickLabel,
+                    onLongClick = onLongClick,
+                    onClick = onClick
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            content()
         }
     }
 }

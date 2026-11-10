@@ -14,6 +14,23 @@ sealed interface MainStatus {
 }
 
 /**
+ * The automatic run that is active on the main screen.
+ *
+ * Only one run checks at a time, the run of the "YT" button and the run that looks for
+ * the fastest config can never run together.
+ */
+enum class MainAutoMode {
+    /** No automatic run is active. */
+    NONE,
+
+    /** The run of the "YT" button is active. */
+    YT_PIPELINE,
+
+    /** The run that looks for the fastest config is active. */
+    FASTEST,
+}
+
+/**
  * Main UI state
  */
 data class MainUiState(
@@ -22,7 +39,7 @@ data class MainUiState(
     val selectedGuid: String? = null,
     val isRunning: Boolean = false,
     val isTesting: Boolean = false,
-    val isYtRunActive: Boolean = false,
+    val autoMode: MainAutoMode = MainAutoMode.NONE,
     val status: MainStatus = MainStatus.Disconnected,
     val locateTarget: LocateTarget? = null,
     val confirmRemove: Boolean = false,
@@ -44,6 +61,7 @@ sealed interface MainAction {
     data object ClearServiceCheckResults : MainAction
     data object CheckYouTubeOnTestedConfigs : MainAction
     data object ToggleYouTubeRun : MainAction
+    data object ToggleFastestRun : MainAction
     data class ShowServiceCheckDetails(val guid: String) : MainAction
     data object DismissServiceCheckDetails : MainAction
     data class CopyServiceCheckBody(val checkId: String) : MainAction

@@ -42,6 +42,36 @@ object ServiceCheckTuning {
      */
     const val SERVICE_CHECK_EVENT_BUFFER = 256
 
+    /**
+     * The percent a candidate must be faster than the connected config before the
+     * automatic run switches to it.
+     *
+     * The percent and the milliseconds are both needed: a small delay needs a bigger
+     * percent, a big delay needs more milliseconds.
+     */
+    const val SWITCH_MIN_IMPROVEMENT_PERCENT = 30
+
+    /**
+     * The milliseconds a candidate must be faster than the connected config before the
+     * automatic run switches to it.
+     */
+    const val SWITCH_MIN_IMPROVEMENT_MS = 50L
+
+    /**
+     * The milliseconds between two switches of the automatic run.
+     *
+     * The first connection of a run counts as a switch, so the next switch waits for
+     * this time.
+     */
+    const val SWITCH_MIN_INTERVAL_MS = 10_000L
+
+    /**
+     * The number of switches of one automatic run.
+     *
+     * The first connection of a run counts as the first switch.
+     */
+    const val SWITCH_MAX_PER_RUN = 3
+
     init {
         require(REAL_DELAY_CONCURRENCY_PIPELINE + YT_CONCURRENCY_PIPELINE <= MAX_TEMP_CORES_ALIVE) {
             "A pipeline run must not use more than $MAX_TEMP_CORES_ALIVE temporary cores at the same time"
