@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.text.TextUtils
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.core.CoreConfigManager
+import com.v2ray.ang.core.YtSortRank
 import com.v2ray.ang.dto.SubscriptionUpdateResult
 import com.v2ray.ang.dto.UrlContentRequest
 import com.v2ray.ang.dto.entities.ProfileItem
@@ -591,6 +592,28 @@ object AngConfigManager {
             .sortedBy { it.second }
             .map { it.first }
             .toMutableList()
+        MmkvManager.encodeServerList(sorted, subId)
+    }
+
+    /**
+     * Sorts servers by their YouTube result for a subscription.
+     *
+     * The order is written the same way as the order of the test results, the ranking
+     * itself lives in [YtSortRank].
+     *
+     * @param subId The subscription ID.
+     */
+    fun sortByYoutubeResultsForSub(subId: String) {
+        val serverList = MmkvManager.decodeServerList(subId)
+        if (serverList.isEmpty()) return
+
+        val sorted = YtSortRank.sort(
+            guids = serverList,
+            delayOf = { guid ->
+                MmkvManager.decodeServerAffiliationInfo(guid)?.testDelayMillis ?: 0L
+            },
+            reportOf = { guid -> MmkvManager.decodeServiceCheckReport(guid) },
+        ).toMutableList()
         MmkvManager.encodeServerList(sorted, subId)
     }
 

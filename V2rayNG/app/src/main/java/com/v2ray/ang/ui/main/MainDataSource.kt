@@ -23,6 +23,7 @@ interface MainDataSource : Closeable {
     fun getDoubleColumnDisplay(): Boolean
     fun isGroupAllDisplayEnabled(): Boolean
     fun isSortWhileTestingEnabled(): Boolean
+    fun isAutoSortAfterTestEnabled(): Boolean
 
     fun getString(resId: Int): String
     fun getString(resId: Int, vararg formatArgs: Any): String
@@ -43,6 +44,7 @@ interface MainDataSource : Closeable {
 
     fun clearAllTestDelayResults(guids: List<String>)
     fun sortByTestResultsForSub(subId: String)
+    fun sortByYoutubeResultsForSub(subId: String)
     fun clearServiceCheckResults()
     fun getServiceCheckReportGuids(): Set<String>
     fun decodeServiceCheckReport(guid: String): ServiceCheckReport?

@@ -11,10 +11,14 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedSendChannelException
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.joinAll
@@ -30,18 +34,47 @@ import kotlinx.coroutines.withContext
 const val SERVICE_CHECK_CONCURRENCY = 3
 
 /**
+ * Number of finished checks that are kept for the screen.
+ *
+ * A worker never waits for the screen, the oldest event is dropped when the buffer is
+ * full. The buffer is much bigger than the number of configs that can finish in one
+ * flush interval of the screen.
+ */
+const val SERVICE_CHECK_EVENT_BUFFER = 256
+
+/**
  * State of the running service check.
  *
  * @param isRunning Whether a run is active.
  * @param done The number of configs that were checked.
  * @param total The number of configs of the run.
  * @param goodCount The number of configs that are usable for YouTube.
+ * @param runId The id of the current run, it changes with every run.
  */
 data class ServiceCheckRunState(
     val isRunning: Boolean = false,
     val done: Int = 0,
     val total: Int = 0,
     val goodCount: Int = 0,
+    val runId: Long = 0L,
+)
+
+/**
+ * One finished service check.
+ *
+ * The event carries the report of the config, so the screen does not have to read the
+ * store again to show the result of the config.
+ *
+ * @param runId The id of the run the check belongs to.
+ * @param guid The GUID of the profile.
+ * @param report The report of the profile.
+ * @param isYtOk Whether the profile is usable for YouTube.
+ */
+data class ServiceCheckEvent(
+    val runId: Long,
+    val guid: String,
+    val report: ServiceCheckReport,
+    val isYtOk: Boolean,
 )
 
 /**
@@ -60,10 +93,26 @@ object ServiceCheckManager {
     /** The state of the running service check. */
     val state: StateFlow<ServiceCheckRunState> = _state.asStateFlow()
 
+    private val _events = MutableSharedFlow<ServiceCheckEvent>(
+        replay = 0,
+        extraBufferCapacity = SERVICE_CHECK_EVENT_BUFFER,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /**
+     * One event per finished config.
+     *
+     * The buffer is big enough for a whole burst of results, so a worker never waits
+     * for the screen. The events of a run are not replayed, a screen that opens in the
+     * middle of a run reads the reports of the store instead.
+     */
+    val events: SharedFlow<ServiceCheckEvent> = _events.asSharedFlow()
+
     private val lock = Any()
     private var queue: Channel<String>? = null
     private var workers: List<Job> = emptyList()
     private var pending = 0
+    private var runCounter = 0L
 
     /**
      * Starts a run with the given configs.
@@ -76,13 +125,14 @@ object ServiceCheckManager {
         val unique = guids.asSequence().filter { it.isNotBlank() }.distinct().toList()
         // The previous run is stopped before the new workers are started, so two runs
         // never check the same config at the same time.
-        synchronized(lock) {
+        val runId = synchronized(lock) {
             stopWorkers()
             pending = 0
+            runCounter++
         }
         if (unique.isEmpty()) {
             synchronized(lock) {
-                _state.value = ServiceCheckRunState()
+                _state.value = ServiceCheckRunState(runId = runId)
             }
             return
         }
@@ -93,7 +143,7 @@ object ServiceCheckManager {
             scope.launch(start = CoroutineStart.LAZY) {
                 try {
                     for (guid in newQueue) {
-                        checkOne(guid)
+                        checkOne(runId, guid)
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -106,7 +156,7 @@ object ServiceCheckManager {
             queue = newQueue
             workers = jobs
             pending = unique.size
-            _state.value = ServiceCheckRunState(isRunning = true, total = unique.size)
+            _state.value = ServiceCheckRunState(isRunning = true, total = unique.size, runId = runId)
         }
         jobs.forEach { it.start() }
         scope.launch {
@@ -200,8 +250,11 @@ object ServiceCheckManager {
 
     /**
      * Checks one config and writes its report to the service check store.
+     *
+     * @param runId The id of the run the check belongs to.
+     * @param guid The GUID of the profile.
      */
-    private suspend fun checkOne(guid: String) {
+    private suspend fun checkOne(runId: Long, guid: String) {
         val report = try {
             ServiceCheckRunner.check(AngApplication.application, guid)
         } catch (e: CancellationException) {
@@ -217,12 +270,13 @@ object ServiceCheckManager {
         withContext(Dispatchers.IO) {
             MmkvManager.encodeServiceCheckReport(report)
         }
+        val isYtOk = ServiceCheckRunner.isYtOk(report)
         synchronized(lock) {
             pending = (pending - 1).coerceAtLeast(0)
             _state.update { current ->
                 current.copy(
                     done = current.done + 1,
-                    goodCount = current.goodCount + if (ServiceCheckRunner.isYtOk(report)) 1 else 0,
+                    goodCount = current.goodCount + if (isYtOk) 1 else 0,
                 )
             }
             if (pending == 0) {
@@ -231,5 +285,15 @@ object ServiceCheckManager {
                 _state.update { it.copy(isRunning = false) }
             }
         }
+        // The event is sent after the report is in the store, so a screen that reads the
+        // store right after the event finds the same report.
+        _events.tryEmit(
+            ServiceCheckEvent(
+                runId = runId,
+                guid = guid,
+                report = report,
+                isYtOk = isYtOk,
+            )
+        )
     }
 }

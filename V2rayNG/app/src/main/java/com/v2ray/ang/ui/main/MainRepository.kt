@@ -129,6 +129,9 @@ class MainRepository(
     override fun isSortWhileTestingEnabled(): Boolean =
         MmkvManager.decodeSettingsBool(AppConfig.PREF_SORT_WHILE_TESTING, true)
 
+    override fun isAutoSortAfterTestEnabled(): Boolean =
+        MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SORT_AFTER_TEST, false)
+
     override fun getString(resId: Int): String = localizedContext.getString(resId)
 
     override fun getString(resId: Int, vararg formatArgs: Any): String =
@@ -186,6 +189,10 @@ class MainRepository(
 
     override fun sortByTestResultsForSub(subId: String) {
         AngConfigManager.sortByTestResultsForSub(subId)
+    }
+
+    override fun sortByYoutubeResultsForSub(subId: String) {
+        AngConfigManager.sortByYoutubeResultsForSub(subId)
     }
 
     override fun clearServiceCheckResults() {

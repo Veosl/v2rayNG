@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
 import com.v2ray.ang.core.ServiceCheckManager
+import com.v2ray.ang.core.ServiceCheckRunState
 import com.v2ray.ang.dto.ConnectionTestResult
 import com.v2ray.ang.dto.GroupMapItem
 import com.v2ray.ang.dto.LocateTarget
@@ -72,6 +73,19 @@ private fun applyTestDelayResultsToRows(
     }
 }
 
+private fun applyServiceCheckReportsToRows(
+    rows: List<ServerRowUiModel>,
+    updates: Map<String, ServiceCheckReport>,
+): List<ServerRowUiModel> = rows.map { row ->
+    val report = updates[row.guid] ?: return@map row
+    val serviceCheck = report.toRowUiModel()
+    if (serviceCheck == row.serviceCheck) {
+        row
+    } else {
+        row.copy(serviceCheck = serviceCheck)
+    }
+}
+
 class MainViewModel(
     application: Application,
     private val dataSource: MainDataSource
@@ -114,7 +128,8 @@ class MainViewModel(
     private var pendingTestProgress: String? = null
 
     private var liveSortJob: Job? = null
-    private var liveSortHasNewResult = false
+    private var liveSortHasNewDelayResult = false
+    private var liveSortHasNewYtResult = false
     private var liveSortLastAtMs = 0L
     private var listScrolling = false
 
@@ -126,6 +141,27 @@ class MainViewModel(
     // only need the small summary of a report.
     private val serviceCheckReports = ConcurrentHashMap<String, ServiceCheckReport>()
 
+    // The reports of the configs that finished since the last flush. They are put into
+    // the rows in batches, so a burst of results does not update the screen once per
+    // result.
+    private val pendingServiceCheckReports = linkedMapOf<String, ServiceCheckReport>()
+    private var serviceCheckFlushJob: Job? = null
+
+    // Whether a service check run is active. The list is sorted by the YouTube result
+    // while a run is active.
+    @Volatile
+    private var ytRunActive = false
+
+    // The group of the running service check. The final sort uses it, so the list of
+    // the group that was checked is sorted even when the user changed the group.
+    // Null means that no run was seen, an empty id is the group with every server.
+    private var ytRunGroupId: String? = null
+
+    // The progress texts of the running tests. They are shown together in one status
+    // line, the delay test and the service check can run at the same time.
+    private var lastDelayProgress: String? = null
+    private var lastYtProgress: String? = null
+
     // Whether this ViewModel has seen a run start. A run that was already over when the
     // screen was opened must not report a result.
     private var serviceCheckRunStarted = false
@@ -136,6 +172,7 @@ class MainViewModel(
     init {
         collectServiceEvents()
         observeServiceCheckState()
+        observeServiceCheckEvents()
         setupGroupTab()
     }
 
@@ -208,7 +245,7 @@ class MainViewModel(
     private fun queueTestResult(result: RealPingResult, request: MainTestRequests.Bulk) {
         pendingTestResults[result.guid] = result.delayMillis
         if (result.delayMillis > 0L) {
-            liveSortHasNewResult = true
+            liveSortHasNewDelayResult = true
         }
         scheduleTestResultFlush(request)
     }
@@ -255,8 +292,22 @@ class MainViewModel(
             }
         }
         if (progress != null && testRequests.bulk?.id == request.id) {
-            _uiState.update { it.copy(status = MainStatus.TestProgress(progress)) }
+            lastDelayProgress = progress
+            publishProgressText()
         }
+    }
+
+    /**
+     * Publishes the progress text of the running tests.
+     *
+     * The delay test and the service check can run at the same time, their texts are
+     * shown together in the same status line.
+     */
+    private fun publishProgressText() {
+        val parts = listOfNotNull(lastDelayProgress, lastYtProgress)
+        if (parts.isEmpty()) return
+        val text = parts.joinToString(dataSource.getString(R.string.service_check_progress_separator))
+        _uiState.update { it.copy(status = MainStatus.TestProgress(text)) }
     }
 
     internal fun formatStatus(status: MainStatus): String = when (status) {
@@ -324,6 +375,7 @@ class MainViewModel(
             MainAction.RemoveDuplicateServers -> removeDuplicateServerAsync()
             MainAction.RemoveInvalidServers -> removeInvalidServerAsync()
             MainAction.SortByTestResults -> sortByTestResultsAsync()
+            MainAction.SortByYoutubeResults -> sortByYoutubeResultsAsync()
             MainAction.ClearServiceCheckResults -> clearServiceCheckResults()
             MainAction.CheckYouTubeOnTestedConfigs -> toggleYouTubeCheck()
             is MainAction.ShowServiceCheckDetails -> showServiceCheckDetails(action.guid)
@@ -768,6 +820,68 @@ class MainViewModel(
     }
 
     /**
+     * Sorts the list of the current group by the YouTube result.
+     *
+     * The order is written the same way as the order of the test results, only the
+     * ranking is different.
+     */
+    private fun sortByYoutubeResultsAsync() {
+        launchLoading {
+            withContext(ioDispatcher) {
+                try {
+                    sortByYoutubeResultsInternal()
+                    cacheMutex.withLock { groupDataCache.clear() }
+                    setupGroupTab(forceRefresh = true)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (e: Exception) {
+                    LogUtil.e(AppConfig.TAG, "Sort by YouTube results failed", e)
+                    toastError(R.string.toast_failure)
+                }
+            }
+        }
+    }
+
+    /**
+     * Sorts the list of a group by the YouTube result.
+     *
+     * The group with an empty id shows the profiles of every subscription, every
+     * subscription is sorted on its own then.
+     *
+     * @param groupId The id of the group.
+     */
+    private fun sortByYoutubeResultsInternal(groupId: String = uiState.value.selectedGroupId) {
+        val subs = if (groupId.isEmpty()) {
+            dataSource.getSubsList()
+        } else {
+            listOf(groupId)
+        }
+        subs.forEach { dataSource.sortByYoutubeResultsForSub(it) }
+    }
+
+    /**
+     * Sorts the list of the checked group by the YouTube result, when the run is over.
+     *
+     * The sort only runs when the setting "Auto sort after testing" is on. A run that
+     * was stopped before every config was checked does not sort the list.
+     *
+     * @param groupId The id of the group of the run.
+     */
+    private fun sortByYoutubeResultsAfterRun(groupId: String) {
+        viewModelScope.launch(ioDispatcher) {
+            try {
+                if (!dataSource.isAutoSortAfterTestEnabled()) return@launch
+                sortByYoutubeResultsInternal(groupId)
+                applyServerOrder(groupId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                LogUtil.e(AppConfig.TAG, "Sort by YouTube results after the run failed", e)
+            }
+        }
+    }
+
+    /**
      * Removes every service check report.
      *
      * A running service check is stopped first, so it cannot write a report after the
@@ -846,8 +960,23 @@ class MainViewModel(
     private fun observeServiceCheckState() {
         viewModelScope.launch {
             ServiceCheckManager.state.collect { state ->
+                val wasRunning = ytRunActive
+                ytRunActive = state.isRunning
+                updateYtProgressText(state)
                 if (state.isRunning) {
                     serviceCheckRunStarted = true
+                    if (!wasRunning) {
+                        // The group of the run is remembered, the final sort uses it.
+                        if (ytRunGroupId == null) {
+                            ytRunGroupId = uiState.value.selectedGroupId
+                        }
+                        // The list is sorted by the YouTube result while a run is
+                        // active. The watcher of the delay test is already running when
+                        // both tests run at the same time.
+                        if (!isBulkTestRunning()) {
+                            startLiveSortWatcher(ytRunGroupId ?: uiState.value.selectedGroupId)
+                        }
+                    }
                     return@collect
                 }
                 if (!serviceCheckRunStarted) return@collect
@@ -860,6 +989,7 @@ class MainViewModel(
                 // A run that was stopped before every config was checked is not a
                 // finished run, it must not report a result.
                 if (state.total <= 0 || state.done < state.total) {
+                    ytRunGroupId = null
                     return@collect
                 }
                 toast(
@@ -869,6 +999,91 @@ class MainViewModel(
                         state.total
                     )
                 )
+                // The list is sorted one last time by the YouTube result.
+                sortByYoutubeResultsAfterRun(ytRunGroupId ?: uiState.value.selectedGroupId)
+                ytRunGroupId = null
+            }
+        }
+    }
+
+    /**
+     * Shows the progress of the service check in the status line of the screen.
+     *
+     * @param state The state of the service check manager.
+     */
+    private fun updateYtProgressText(state: ServiceCheckRunState) {
+        val text = if (state.isRunning && state.total > 0) {
+            dataSource.getString(
+                R.string.service_check_progress_youtube,
+                state.done,
+                state.total,
+                state.goodCount,
+            )
+        } else {
+            null
+        }
+        if (text == lastYtProgress) return
+        lastYtProgress = text
+        if (text == null) {
+            // The run is over, the status line shows the delay test again.
+            if (lastDelayProgress == null) {
+                resetTestStatus()
+            } else {
+                publishProgressText()
+            }
+            if (!isBulkTestRunning()) {
+                stopLiveSortWatcher()
+            }
+            return
+        }
+        publishProgressText()
+    }
+
+    /**
+     * Collects the finished service checks.
+     *
+     * The report comes with the event, so the store is not read again for every config.
+     * The rows are updated in batches, the same way the delay results are.
+     */
+    private fun observeServiceCheckEvents() {
+        viewModelScope.launch {
+            ServiceCheckManager.events.collect { event ->
+                serviceCheckReports[event.guid] = event.report
+                pendingServiceCheckReports[event.guid] = event.report
+                liveSortHasNewYtResult = true
+                scheduleServiceCheckFlush()
+            }
+        }
+    }
+
+    /**
+     * Starts the flush of the finished service checks, if it is not running already.
+     */
+    private fun scheduleServiceCheckFlush() {
+        if (serviceCheckFlushJob?.isActive == true) return
+
+        serviceCheckFlushJob = viewModelScope.launch {
+            while (pendingServiceCheckReports.isNotEmpty()) {
+                delay(SERVICE_CHECK_FLUSH_INTERVAL_MS)
+                flushPendingServiceCheckReports()
+            }
+        }
+    }
+
+    /**
+     * Puts the finished service checks into the rows.
+     *
+     * Only the rows of the changed configs get a new instance, the other rows keep
+     * theirs and are not recomposed.
+     */
+    private fun flushPendingServiceCheckReports() {
+        val drained = pendingServiceCheckReports.toMap()
+        pendingServiceCheckReports.clear()
+        if (drained.isEmpty()) return
+
+        groupUiFlows.keys.toList().forEach { groupId ->
+            mutableServerGroupState(groupId).update { current ->
+                current.copy(rows = applyServiceCheckReportsToRows(current.rows, drained))
             }
         }
     }
@@ -1042,7 +1257,8 @@ class MainViewModel(
      */
     private fun startLiveSortWatcher(groupId: String) {
         stopLiveSortWatcher()
-        liveSortHasNewResult = false
+        liveSortHasNewDelayResult = false
+        liveSortHasNewYtResult = false
         liveSortLastAtMs = 0L
         liveSortJob = viewModelScope.launch {
             // The setting lives in MMKV, so it is read off the main thread.
@@ -1061,33 +1277,46 @@ class MainViewModel(
     private fun stopLiveSortWatcher() {
         liveSortJob?.cancel()
         liveSortJob = null
-        liveSortHasNewResult = false
+        liveSortHasNewDelayResult = false
+        liveSortHasNewYtResult = false
     }
 
     /**
      * Decides whether the list may be re-sorted right now.
      *
      * A sort needs a new valid result, must not run while the user scrolls the list and
-     * must not run more often than every [LIVE_SORT_MIN_INTERVAL_MS].
+     * must not run more often than every [LIVE_SORT_MIN_INTERVAL_MS]. While a YouTube
+     * check is running, a new report of the check also starts a sort.
      */
     private fun liveSortDue(): Boolean {
-        if (!liveSortHasNewResult) return false
+        val hasNewResult =
+            liveSortHasNewDelayResult || (ytRunActive && liveSortHasNewYtResult)
+        if (!hasNewResult) return false
         if (listScrolling) return false
         val now = SystemClock.elapsedRealtime()
         if (now - liveSortLastAtMs < LIVE_SORT_MIN_INTERVAL_MS) return false
         liveSortLastAtMs = now
-        liveSortHasNewResult = false
+        liveSortHasNewDelayResult = false
+        liveSortHasNewYtResult = false
         return true
     }
 
     private suspend fun runLiveSort(groupId: String) {
         try {
-            sortByTestResultsInternal(groupId)
-            applyServerOrder(groupId)
+            // While a YouTube check is running, the list is sorted by the YouTube
+            // result of the checked group, the delay test keeps its own ranking.
+            if (ytRunActive) {
+                val ytGroupId = ytRunGroupId ?: groupId
+                sortByYoutubeResultsInternal(ytGroupId)
+                applyServerOrder(ytGroupId)
+            } else {
+                sortByTestResultsInternal(groupId)
+                applyServerOrder(groupId)
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Live sort by test results failed", e)
+            LogUtil.e(AppConfig.TAG, "Live sort failed", e)
         }
     }
 
@@ -1135,10 +1364,22 @@ class MainViewModel(
         testRequests.cancelBulk()
         testRequests.invalidateCurrent()
         cancelPendingTestResults()
-        stopLiveSortWatcher()
+        if (!ytRunActive) {
+            stopLiveSortWatcher()
+        }
         resetTestStatus()
+        // A service check can still be running, its progress stays in the status line.
+        publishProgressText()
         dataSource.cancelAllPing()
     }
+
+    /**
+     * Returns whether a real-delay test of the whole list is running.
+     *
+     * The watcher of the live sort is shared by the delay test and the service check,
+     * so it must only be stopped when no test is running any more.
+     */
+    private fun isBulkTestRunning(): Boolean = testRequests.bulk != null
 
     private fun resetTestStatus() {
         _uiState.update {
@@ -1184,6 +1425,8 @@ class MainViewModel(
                 status = MainStatus.Testing
             )
         }
+        // A service check can still be running, its progress stays in the status line.
+        publishProgressText()
         bulkTestJob = viewModelScope.launch {
             withContext(ioDispatcher) {
                 dataSource.clearAllTestDelayResults(serverGuids)
@@ -1206,6 +1449,7 @@ class MainViewModel(
         testResultFlushJob = null
         pendingTestResults.clear()
         pendingTestProgress = null
+        lastDelayProgress = null
     }
 
     fun testCurrentServerRealPing() {
@@ -1217,8 +1461,16 @@ class MainViewModel(
 
     private fun onTestsFinished(requestId: String) {
         if (testRequests.completeBulk(requestId) == null) return
-        stopLiveSortWatcher()
+        if (ytRunActive) {
+            // A service check is still running, its watcher sorts the list by the
+            // YouTube result.
+            startLiveSortWatcher(ytRunGroupId ?: uiState.value.selectedGroupId)
+        } else {
+            stopLiveSortWatcher()
+        }
         resetTestStatus()
+        // A service check can still be running, its progress stays in the status line.
+        publishProgressText()
         viewModelScope.launch(ioDispatcher) {
             cacheMutex.withLock { groupDataCache.clear() }
             reloadAllGroups(_uiState.value.groups.map { it.id })
@@ -1283,6 +1535,7 @@ class MainViewModel(
 
     private companion object {
         const val TEST_RESULT_FLUSH_INTERVAL_MS = 500L
+        const val SERVICE_CHECK_FLUSH_INTERVAL_MS = 400L
         const val LIVE_SORT_TICK_MS = 500L
         const val LIVE_SORT_MIN_INTERVAL_MS = 1_500L
     }

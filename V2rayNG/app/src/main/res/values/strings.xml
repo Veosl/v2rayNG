@@ -368,6 +368,8 @@
     <string name="acc_service_check_details">Open the service check details</string>
     <string name="service_check_chip_youtube">YT</string>
     <string name="service_check_chip_music">M</string>
+    <string name="service_check_progress_youtube">YT %1$d/%2$d · %3$d OK</string>
+    <string name="service_check_progress_separator">" · "</string>
     <string name="service_check_label_youtube_premium">YouTube Premium</string>
     <string name="service_check_label_google_search_captcha">Google Search</string>
     <string name="service_check_label_youtube_country">YouTube country</string>
@@ -384,6 +386,7 @@
     <string name="action_copy">Copy</string>
     <string name="title_user_asset_setting">Asset files</string>
     <string name="title_sort_by_test_results">Sort by test results</string>
+    <string name="title_sort_by_youtube_results">Sort by YouTube results</string>
     <string name="title_filter_config">Filter configs</string>
     <string name="filter_config_all">All</string>
     <string name="summary_scan_qrcode">Tap the screen to open the camera and scan</string>

@@ -34,6 +34,7 @@ enum class MainMoreMenuAction(@StringRes val labelRes: Int) {
     ExportAll(R.string.title_export_all),
     LocateSelected(R.string.title_locate_selected_config),
     SortByTestResults(R.string.title_sort_by_test_results),
+    SortByYoutubeResults(R.string.title_sort_by_youtube_results),
     TestAll(R.string.title_ping_all_server),
     TestAllRealPing(R.string.title_real_ping_all_server),
     CheckYouTubeOnTestedConfigs(R.string.title_check_youtube_on_tested_configs),

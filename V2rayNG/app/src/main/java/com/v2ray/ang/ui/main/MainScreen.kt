@@ -184,6 +184,7 @@ fun MainScreen(
                             MainMoreMenuAction.ExportAll -> onAction(MainAction.ExportAll)
                             MainMoreMenuAction.LocateSelected -> onAction(MainAction.LocateSelectedServer)
                             MainMoreMenuAction.SortByTestResults -> onAction(MainAction.SortByTestResults)
+                            MainMoreMenuAction.SortByYoutubeResults -> onAction(MainAction.SortByYoutubeResults)
                             MainMoreMenuAction.TestAll -> onAction(MainAction.TestAllServers)
                             MainMoreMenuAction.TestAllRealPing -> onAction(MainAction.TestRealAllServers)
                             MainMoreMenuAction.CheckYouTubeOnTestedConfigs -> onAction(MainAction.CheckYouTubeOnTestedConfigs)
