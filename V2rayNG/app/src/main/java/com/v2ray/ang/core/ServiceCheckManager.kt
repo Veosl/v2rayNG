@@ -13,7 +13,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -24,32 +23,33 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.PriorityQueue
 
 /**
- * Number of configs that are checked at the same time.
+ * One config that waits for its check.
  *
- * The real-ping worker uses the user setting for this, but a service check starts one
- * native core per config, so the amount of parallel cores is kept low and constant.
+ * @param guid The GUID of the profile.
+ * @param delayMillis The real delay of the profile. The config with the lowest delay is
+ * checked first.
+ * @param sequence The order in which the config was added. It keeps the order of the
+ * configs with the same delay stable.
  */
-const val SERVICE_CHECK_CONCURRENCY = 3
-
-/**
- * Number of finished checks that are kept for the screen.
- *
- * A worker never waits for the screen, the oldest event is dropped when the buffer is
- * full. The buffer is much bigger than the number of configs that can finish in one
- * flush interval of the screen.
- */
-const val SERVICE_CHECK_EVENT_BUFFER = 256
+private data class PendingCheck(
+    val guid: String,
+    val delayMillis: Long,
+    val sequence: Long,
+)
 
 /**
  * State of the running service check.
  *
  * @param isRunning Whether a run is active.
  * @param done The number of configs that were checked.
- * @param total The number of configs of the run.
+ * @param total The number of configs of the run. It grows while a pipeline run adds
+ * more configs.
  * @param goodCount The number of configs that are usable for YouTube.
  * @param runId The id of the current run, it changes with every run.
+ * @param inputClosed Whether the run takes no more configs.
  */
 data class ServiceCheckRunState(
     val isRunning: Boolean = false,
@@ -57,6 +57,7 @@ data class ServiceCheckRunState(
     val total: Int = 0,
     val goodCount: Int = 0,
     val runId: Long = 0L,
+    val inputClosed: Boolean = false,
 )
 
 /**
@@ -78,11 +79,19 @@ data class ServiceCheckEvent(
 )
 
 /**
- * Runs the service checks of the configs of the whole app.
+ * Runs the service checks of the configs.
  *
- * The manager is an application scoped object with its own scope, so a run survives the
- * recreation of the main activity. The results are written to the service check store
- * of [MmkvManager], they do not live in the memory of a screen.
+ * The manager lives in the application, so a run survives the recreation of the
+ * activity. There are two kinds of run:
+ *
+ * * a **standalone run** ([start]) checks a fixed list of configs, the input is closed
+ *   at once and the run ends when every config was checked.
+ * * a **pipeline run** ([beginPipeline]) takes its configs while it runs
+ *   ([enqueue]), the config with the lowest real delay is checked first and the run
+ *   ends when the input was closed ([endInput]) and every config was checked.
+ *
+ * The reports live in their own store ([MmkvManager]), they never touch the real delay
+ * results.
  */
 object ServiceCheckManager {
 
@@ -95,7 +104,7 @@ object ServiceCheckManager {
 
     private val _events = MutableSharedFlow<ServiceCheckEvent>(
         replay = 0,
-        extraBufferCapacity = SERVICE_CHECK_EVENT_BUFFER,
+        extraBufferCapacity = ServiceCheckTuning.SERVICE_CHECK_EVENT_BUFFER,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
@@ -109,89 +118,117 @@ object ServiceCheckManager {
     val events: SharedFlow<ServiceCheckEvent> = _events.asSharedFlow()
 
     private val lock = Any()
-    private var queue: Channel<String>? = null
+
+    /** The configs that wait for their check, the lowest delay comes first. */
+    private val pendingChecks =
+        PriorityQueue<PendingCheck>(compareBy<PendingCheck> { it.delayMillis }.thenBy { it.sequence })
+
+    /** The GUIDs of the current run, a config is only checked once per run. */
+    private val seenGuids = HashSet<String>()
+
+    /** Wakes a worker that waits for work. */
+    private val workSignal = Channel<Unit>(Channel.UNLIMITED)
+
     private var workers: List<Job> = emptyList()
-    private var pending = 0
+
+    /** The number of workers that check a config at the moment. */
+    private var activeWorkers = 0
+
+    /** Whether the run takes no more configs. */
+    private var inputClosed = false
+
+    /** Whether the run is over, the workers leave their loop. */
+    private var runOver = false
+
+    private var sequenceCounter = 0L
     private var runCounter = 0L
+    private var currentRunId = 0L
 
     /**
-     * Starts a run with the given configs.
+     * A new id for a run.
+     *
+     * Every run has its own id, so the events of an old run can be told apart from the
+     * events of the current one.
+     */
+    fun newRunId(): Long = synchronized(lock) { ++runCounter }
+
+    /**
+     * Starts a standalone run with the given configs.
      *
      * A run that is already active is stopped first, so two runs never check the same
-     * config at the same time. The configs are queued, the workers check them with
-     * [SERVICE_CHECK_CONCURRENCY] checks at the same time.
+     * config at the same time. The configs are checked with
+     * [ServiceCheckTuning.YT_CONCURRENCY_STANDALONE] checks at the same time.
+     *
+     * @param guids The GUIDs of the profiles.
      */
     fun start(guids: List<String>) {
         val unique = guids.asSequence().filter { it.isNotBlank() }.distinct().toList()
-        // The previous run is stopped before the new workers are started, so two runs
-        // never check the same config at the same time.
-        val runId = synchronized(lock) {
-            stopWorkers()
-            pending = 0
-            runCounter++
-        }
+        val runId = newRunId()
         if (unique.isEmpty()) {
             synchronized(lock) {
                 _state.value = ServiceCheckRunState(runId = runId)
             }
             return
         }
-        val newQueue = Channel<String>(Channel.UNLIMITED)
-        // The workers are started by hand, so the run state is complete before the
-        // first config is checked.
-        val jobs = List(SERVICE_CHECK_CONCURRENCY) {
-            scope.launch(start = CoroutineStart.LAZY) {
-                try {
-                    for (guid in newQueue) {
-                        checkOne(runId, guid)
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    LogUtil.e(AppConfig.TAG, "Service check worker failed", e)
-                }
-            }
-        }
-        synchronized(lock) {
-            queue = newQueue
-            workers = jobs
-            pending = unique.size
-            _state.value = ServiceCheckRunState(isRunning = true, total = unique.size, runId = runId)
-        }
+        val jobs = beginRun(runId, ServiceCheckTuning.YT_CONCURRENCY_STANDALONE)
+        // Every config of a standalone run has the same delay, they are checked in the
+        // order of the list.
+        unique.forEach { enqueue(it, 0L) }
+        endInput()
         jobs.forEach { it.start() }
-        scope.launch {
-            try {
-                unique.forEach { newQueue.send(it) }
-            } catch (e: ClosedSendChannelException) {
-                LogUtil.i(AppConfig.TAG, "Service check run was cancelled before it started")
+    }
+
+    /**
+     * Starts a pipeline run.
+     *
+     * The configs are added while the run is going with [enqueue]. The run ends when
+     * [endInput] was called and every config that was added was checked.
+     *
+     * @param runId The id of the run. The events of the run carry it.
+     */
+    fun beginPipeline(runId: Long) {
+        val jobs = beginRun(runId, ServiceCheckTuning.YT_CONCURRENCY_PIPELINE)
+        jobs.forEach { it.start() }
+    }
+
+    /**
+     * Adds one config to the running run.
+     *
+     * The config with the lowest real delay is checked first. A config that is already
+     * part of the run is ignored, so a config is never checked twice.
+     *
+     * @param guid The GUID of the profile.
+     * @param delayMillis The real delay of the profile.
+     */
+    fun enqueue(guid: String, delayMillis: Long) {
+        if (guid.isBlank()) return
+        val queued = synchronized(lock) {
+            if (runOver || !seenGuids.add(guid)) {
+                false
+            } else {
+                pendingChecks.add(PendingCheck(guid, delayMillis, sequenceCounter++))
+                _state.update { it.copy(isRunning = true, total = it.total + 1) }
+                true
             }
+        }
+        if (queued) {
+            workSignal.trySend(Unit)
         }
     }
 
     /**
-     * Adds one config to the running check.
+     * Closes the input of the running run.
      *
-     * A check that is not running yet is started with the config.
+     * No more configs are added after this call. The run ends when the queue is empty
+     * and every worker is idle.
      */
-    fun enqueue(guid: String) {
-        if (guid.isBlank()) return
-        val queued = synchronized(lock) {
-            val current = queue
-            if (current == null) {
-                false
-            } else {
-                pending++
-                val sent = current.trySend(guid)
-                if (sent.isSuccess) {
-                    _state.update { it.copy(isRunning = true, total = it.total + 1) }
-                    true
-                } else {
-                    pending--
-                    false
-                }
-            }
+    fun endInput() {
+        synchronized(lock) {
+            inputClosed = true
+            _state.update { it.copy(inputClosed = true) }
+            finishRunIfDone()
+            wakeWorkers()
         }
-        if (!queued) start(listOf(guid))
     }
 
     /**
@@ -202,8 +239,11 @@ object ServiceCheckManager {
     fun cancel() {
         synchronized(lock) {
             stopWorkers()
-            pending = 0
-            _state.update { it.copy(isRunning = false) }
+            pendingChecks.clear()
+            seenGuids.clear()
+            runOver = true
+            inputClosed = true
+            _state.update { it.copy(isRunning = false, inputClosed = true) }
         }
     }
 
@@ -216,36 +256,142 @@ object ServiceCheckManager {
     suspend fun cancelAndJoin() {
         val jobs = synchronized(lock) {
             val stopped = stopWorkers()
-            pending = 0
-            _state.update { it.copy(isRunning = false) }
+            pendingChecks.clear()
+            seenGuids.clear()
+            runOver = true
+            inputClosed = true
+            _state.update { it.copy(isRunning = false, inputClosed = true) }
             stopped
         }
         jobs.joinAll()
     }
 
     /**
-     * Stops the workers and closes the queue, the caller holds the lock.
+     * Prepares a new run and creates its workers.
+     *
+     * The workers are not started yet, so the state of the run is complete before the
+     * first config is checked.
+     *
+     * @param runId The id of the run.
+     * @param concurrency The number of workers of the run.
+     * @return The workers of the run, they are not started yet.
+     */
+    private fun beginRun(runId: Long, concurrency: Int): List<Job> = synchronized(lock) {
+        // The previous run is stopped before the new workers are started, so two runs
+        // never check the same config at the same time.
+        stopWorkers()
+        pendingChecks.clear()
+        seenGuids.clear()
+        sequenceCounter = 0L
+        activeWorkers = 0
+        runOver = false
+        inputClosed = false
+        currentRunId = runId
+        // The id of the run comes from the caller, the counter stays above it so the
+        // next run of this manager never uses the same id.
+        runCounter = maxOf(runCounter, runId)
+        _state.value = ServiceCheckRunState(isRunning = true, total = 0, runId = runId)
+        // The signals of the old run are dropped, they would only wake a worker that
+        // has no work yet.
+        while (workSignal.tryReceive().isSuccess) {
+            // The signal of the old run is dropped.
+        }
+        val jobs = List(concurrency) {
+            scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    while (true) {
+                        val next = takeNext(runId) ?: break
+                        try {
+                            checkOne(runId, next.guid)
+                        } finally {
+                            onWorkerIdle(runId)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    LogUtil.e(AppConfig.TAG, "Service check worker failed", e)
+                }
+            }
+        }
+        workers = jobs
+        jobs
+    }
+
+    /**
+     * Stops the workers of the run, the caller holds the lock.
      *
      * @return The jobs of the stopped workers.
      */
     private fun stopWorkers(): List<Job> {
         val stopped = workers
-        stopped.forEach { it.cancel() }
         workers = emptyList()
-        queue?.close()
-        queue = null
+        stopped.forEach { it.cancel() }
         return stopped
     }
 
     /**
-     * Ends the run when every queued config was checked, the caller holds the lock.
+     * Takes the next config of the run.
      *
-     * The queue is closed so the workers leave their loop, they are not cancelled
-     * because they have no work left.
+     * The config with the lowest delay is taken first. The worker waits until a config
+     * is added or the run is over.
+     *
+     * @param runId The id of the run the worker belongs to.
+     * @return The next config, null when the run is over.
      */
-    private fun finishRun() {
-        queue?.close()
-        queue = null
+    private suspend fun takeNext(runId: Long): PendingCheck? {
+        while (true) {
+            val next = synchronized(lock) {
+                if (runId != currentRunId || runOver) {
+                    null
+                } else {
+                    val head = pendingChecks.poll()
+                    if (head != null) activeWorkers++
+                    head
+                }
+            }
+            if (next != null) return next
+            if (synchronized(lock) { runId != currentRunId || runOver }) return null
+            workSignal.receive()
+        }
+    }
+
+    /**
+     * Marks a worker as idle and ends the run when it was the last one.
+     *
+     * @param runId The id of the run the worker belongs to.
+     */
+    private fun onWorkerIdle(runId: Long) {
+        synchronized(lock) {
+            // A worker of an old run must not change the state of the current run.
+            if (runId != currentRunId) return
+            activeWorkers--
+            finishRunIfDone()
+        }
+    }
+
+    /**
+     * Ends the run when the input is closed, the queue is empty and every worker is
+     * idle. The caller holds the lock.
+     */
+    private fun finishRunIfDone() {
+        if (!inputClosed) return
+        if (pendingChecks.isNotEmpty()) return
+        if (activeWorkers > 0) return
+        runOver = true
+        _state.update { it.copy(isRunning = false) }
+        wakeWorkers()
+    }
+
+    /**
+     * Wakes the workers that wait for work.
+     *
+     * Every worker gets a signal, so all of them leave their wait when the run is over.
+     */
+    private fun wakeWorkers() {
+        repeat(workers.size) {
+            workSignal.trySend(Unit)
+        }
     }
 
     /**
@@ -272,17 +418,14 @@ object ServiceCheckManager {
         }
         val isYtOk = ServiceCheckRunner.isYtOk(report)
         synchronized(lock) {
-            pending = (pending - 1).coerceAtLeast(0)
+            // The run was replaced while the config was checked, the state of the
+            // current run must not change.
+            if (runId != currentRunId) return
             _state.update { current ->
                 current.copy(
                     done = current.done + 1,
                     goodCount = current.goodCount + if (isYtOk) 1 else 0,
                 )
-            }
-            if (pending == 0) {
-                // The run is over, the workers are released until the next run starts.
-                finishRun()
-                _state.update { it.copy(isRunning = false) }
             }
         }
         // The event is sent after the report is in the store, so a screen that reads the

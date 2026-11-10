@@ -1391,7 +1391,15 @@ class MainViewModel(
         }
     }
 
-    fun testAllRealPing(onlyTcp: Boolean = false) {
+    /**
+     * Starts a real-delay test of the current group.
+     *
+     * @param onlyTcp Whether only the TCP delay is measured.
+     * @param concurrency The number of tests that run at the same time. Zero means the
+     * user setting is used, a positive number is an override for this run only. The
+     * user setting itself is never changed.
+     */
+    fun testAllRealPing(onlyTcp: Boolean = false, concurrency: Int = 0) {
         cancelAllPing()
         val groupId = uiState.value.selectedGroupId
         val servers = currentServers()
@@ -1416,7 +1424,8 @@ class MainViewModel(
             key = AppConfig.MSG_MEASURE_CONFIG_START,
             subscriptionId = groupId,
             serverGuids = if (keywordFilter.isNotEmpty()) serverGuids else emptyList(),
-            onlyTcp = onlyTcp
+            onlyTcp = onlyTcp,
+            concurrency = concurrency
         )
         startLiveSortWatcher(groupId)
         _uiState.update {

@@ -39,18 +39,48 @@ internal object RealPingExecutionLimiter {
 }
 
 /**
+ * The number of tests of a batch that run at the same time.
+ *
+ * An override is used as it is, the user setting keeps its own rule: a TCP-only batch
+ * uses twice the number of threads.
+ *
+ * @param override The number of the run, zero means the user setting is used.
+ * @param userConcurrency The number of the user setting.
+ * @param onlyTcp Whether only the TCP delay is measured.
+ * @return The number of threads of the batch.
+ */
+private fun resolveRealPingConcurrency(override: Int, userConcurrency: Int, onlyTcp: Boolean): Int {
+    if (override > 0) return override
+    return if (onlyTcp) userConcurrency * 2 else userConcurrency
+}
+
+/**
  * Worker that runs a batch of real-ping tests independently.
  * Each batch owns its own CoroutineScope/dispatcher and can be cancelled separately.
+ *
+ * @param context The context of the worker.
+ * @param guids The GUIDs of the configs that are measured.
+ * @param onlyTcp Whether only the TCP delay is measured.
+ * @param concurrency The number of tests that run at the same time. Zero means the
+ * user setting is used, a positive number is an override for this batch only. The user
+ * setting itself is never changed.
+ * @param onEvent The callback of the events of the batch.
  */
 class RealPingWorkerService(
     private val context: Context,
     private val guids: List<String>,
     private val onlyTcp: Boolean = false,
+    concurrency: Int = 0,
     private val onEvent: (RealPingEvent) -> Unit = {}
 ) {
     private val job = SupervisorJob()
-    private val concurrency = SettingsManager.getRealPingConcurrency()
-    private val dispatcher = Executors.newFixedThreadPool(if (onlyTcp) concurrency * 2 else concurrency).asCoroutineDispatcher()
+    private val dispatcher = Executors.newFixedThreadPool(
+        resolveRealPingConcurrency(
+            override = concurrency,
+            userConcurrency = SettingsManager.getRealPingConcurrency(),
+            onlyTcp = onlyTcp,
+        )
+    ).asCoroutineDispatcher()
     private val scope = CoroutineScope(job + dispatcher + CoroutineName("RealPingBatchWorker"))
 
     private val runningCount = AtomicInteger(0)
